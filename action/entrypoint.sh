@@ -74,14 +74,36 @@ curl -sS -X POST \
 
 # Post PR comment (only if pull_request event)
 if [[ -n "${PR_NUMBER}" ]]; then
-  echo "Posting PR comment..."
+  echo "Upserting PR comment..."
   COMMENT_BODY="$(cat "${REPORT_MD}")"
+  MARKER="<!-- release-guardian:rdi -->"
 
-  curl -sS -X POST \
+  # Fetch existing comments (paginate lightly; v1: first 100 is usually enough)
+  COMMENTS_JSON="$(curl -sS \
     -H "Authorization: Bearer ${INPUT_GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
-    "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-    -d "$(jq -nc --arg body "${COMMENT_BODY}" '{body:$body}')" >/dev/null
+    "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
+
+  # Find first comment ID containing the marker
+  EXISTING_ID="$(echo "${COMMENTS_JSON}" | jq -r --arg m "${MARKER}" '
+    map(select(.body != null and (.body | contains($m)))) | .[0].id // empty
+  ')"
+
+  if [[ -n "${EXISTING_ID}" ]]; then
+    echo "Found existing Release Guardian comment (id=${EXISTING_ID}); updating..."
+    curl -sS -X PATCH \
+      -H "Authorization: Bearer ${INPUT_GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
+      -d "$(jq -nc --arg body "${COMMENT_BODY}" '{body:$body}')" >/dev/null
+  else
+    echo "No existing Release Guardian comment found; creating..."
+    curl -sS -X POST \
+      -H "Authorization: Bearer ${INPUT_GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+      -d "$(jq -nc --arg body "${COMMENT_BODY}" '{body:$body}')" >/dev/null
+  fi
 else
   echo "Not a pull_request event; skipping PR comment."
 fi
