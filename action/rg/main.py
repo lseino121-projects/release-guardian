@@ -5,23 +5,19 @@ import json
 from pathlib import Path
 
 from rg.github_context import load_context
-from rg.report import RDIReport, render_pr_comment_md
+from rg.models import RDIReport
+from rg.scanners.trivy import run_trivy_fs
+from rg.normalize.trivy_norm import normalize_trivy
+from rg.report.pr_comment import render_pr_comment_md
 
 
-def decide_placeholder(mode: str) -> tuple[str, int, list[str]]:
+def decide_placeholder(mode: str) -> tuple[str, int]:
     """
     Placeholder decision engine.
-    Next step: replace with scanner execution + normalization + RDI scoring.
+    Next step: replace with normalization + RDI scoring.
     """
-    # v1 scaffold logic: always Go, unless mode is enforce and we want to test paths later.
-    verdict = "go"
-    score = 18
-    notes = [
-        "Scaffold run: scanner integration not enabled yet.",
-        "Next: run Trivy/Syft/Grype/Semgrep locally in the runner.",
-        "Decision engine will block only *introduced* high-risk findings (v1 policy).",
-    ]
-    return verdict, score, notes
+    # v1: always go
+    return "go", 18
 
 
 def main() -> int:
@@ -34,14 +30,27 @@ def main() -> int:
     ap.add_argument("--allow-conditional", required=True)
     ap.add_argument("--out-json", required=True)
     ap.add_argument("--out-md", required=True)
-
     args = ap.parse_args()
 
     ctx = load_context(args.event_path)
 
-    verdict, score, notes = decide_placeholder(args.mode)
+    workspace = "/github/workspace"
+    out_dir = f"{workspace}/.rg/out"
+
+    # Run Trivy FS + normalize
+    trivy_path = run_trivy_fs(workspace=workspace, out_dir=out_dir, timeout=600)
+    trivy_findings = normalize_trivy(str(trivy_path))
+
+    verdict, score = decide_placeholder(args.mode)
+
+    notes = [
+        f"Trivy findings: {len(trivy_findings)} (not gating yet).",
+        "Next: add Syft + Grype for SBOM-based vulnerability correlation.",
+        "Decision engine will block only *introduced* high-risk findings (v1 policy).",
+    ]
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
+
     report = RDIReport(
         verdict=verdict,
         rdi_score=score,
@@ -55,11 +64,11 @@ def main() -> int:
             "head_sha": ctx.head_sha,
         },
         notes=notes,
-        top_findings=[],
+        top_findings=[f.__dict__ for f in trivy_findings[:10]],
     )
 
     Path(args.out_json).write_text(json.dumps(report.to_dict(), indent=2))
-    Path(args.out_md).write_text(render_pr_comment_md(report))
+    Path(args.out_md).write_text(render_pr_comment_md(report, trivy_findings))
     return 0
 
 
