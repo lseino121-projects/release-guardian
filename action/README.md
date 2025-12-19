@@ -24,6 +24,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Release Guardian
-        uses: your-org/release-guardian-action@v1
+        uses: lseino121-projects/release-guardian@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
