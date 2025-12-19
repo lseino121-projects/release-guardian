@@ -1,5 +1,6 @@
 FROM python:3.12-slim
 
+# Base utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -7,17 +8,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
   && rm -rf /var/lib/apt/lists/*
 
-# Install Trivy via APT repo (deterministic)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget gnupg lsb-release \
-  && wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor -o /usr/share/keyrings/trivy.gpg \
-  && echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
-     > /etc/apt/sources.list.d/trivy.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends trivy \
-  && rm -rf /var/lib/apt/lists/*
+# Install Trivy (pinned) via GitHub Release .deb
+# Works even when Debian codename (e.g., trixie) isn't supported by the Trivy APT repo.
+ARG TRIVY_VERSION=0.57.1
 
+RUN set -eux; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in \
+    amd64)  deb_arch="64bit" ;; \
+    arm64)  deb_arch="ARM64" ;; \
+    *) echo "Unsupported arch: $arch"; exit 1 ;; \
+  esac; \
+  curl -fsSL -o /tmp/trivy.deb \
+    "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${deb_arch}.deb"; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends /tmp/trivy.deb; \
+  rm -f /tmp/trivy.deb; \
+  rm -rf /var/lib/apt/lists/*
+
+# Fail fast if install didn't work
 RUN trivy --version
+
 WORKDIR /app
 
 COPY entrypoint.sh /app/entrypoint.sh
