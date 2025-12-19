@@ -1,0 +1,43 @@
+name: "Release Guardian"
+description: "Release Decision Intelligence (RDI) — one clear, explainable verdict per PR."
+author: "Release Guardian"
+inputs:
+  github_token:
+    description: "GitHub token used to post PR comments and commit statuses."
+    required: true
+  mode:
+    description: "enforce (default) or report-only"
+    required: false
+    default: "enforce"
+  severity_threshold:
+    description: "critical|high|medium (default high)"
+    required: false
+    default: "high"
+  allow_conditional:
+    description: "true|false (default true)"
+    required: false
+    default: "true"
+  timeout_seconds:
+    description: "Overall timeout budget (not enforced in v0 scaffold)"
+    required: false
+    default: "900"
+
+outputs:
+  verdict:
+    description: "go|conditional|no-go"
+  rdi_score:
+    description: "0-100"
+  summary:
+    description: "One-line decision summary"
+  report_path:
+    description: "Path to the JSON report in the workspace"
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+    INPUT_MODE: ${{ inputs.mode }}
+    INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity_threshold }}
+    INPUT_ALLOW_CONDITIONAL: ${{ inputs.allow_conditional }}
+    INPUT_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
