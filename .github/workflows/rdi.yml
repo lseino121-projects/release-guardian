@@ -2,17 +2,26 @@ name: Release Guardian (test)
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
   pull-requests: write
   statuses: write
 
+concurrency:
+  group: rdi-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   rdi:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Release Guardian
         uses: ./action

@@ -18,6 +18,8 @@ class RDIReport:
 
 
 def render_pr_comment_md(report: RDIReport) -> str:
+    marker = "<!-- release-guardian:rdi -->"
+
     verdict = report.verdict
     score = report.rdi_score
 
@@ -30,7 +32,8 @@ def render_pr_comment_md(report: RDIReport) -> str:
 
     why_lines = "\n".join([f"- {n}" for n in report.notes]) if report.notes else "- (No notes)"
 
-    md = f"""{header}
+    md = f"""{marker}
+{header}
 
 **Summary:** {report.summary}
 
