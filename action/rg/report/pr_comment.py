@@ -28,7 +28,7 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
     return "\n".join(lines)
 
 
-def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding]) -> str:
+def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype_findings: List[Finding]) -> str:
     marker = "<!-- release-guardian:rdi -->"
 
     verdict = report.verdict
@@ -41,11 +41,11 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding]) -> st
     else:
         header = f"❌ **No-Go** — RDI **{score}**"
 
-    notes = report.notes or []
-    notes = notes[:6]  # keep PR comment tight
+    notes = (report.notes or [])[:6]
     why_lines = "\n".join([f"- {_md(n)}" for n in notes]) if notes else "- (No notes)"
 
-    table = _top_findings_table(trivy_findings)
+    trivy_table = _top_findings_table(trivy_findings)
+    grype_table = _top_findings_table(grype_findings)
 
     md = f"""{marker}
 {header}
@@ -56,12 +56,15 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding]) -> st
 {why_lines}
 
 ### Top findings (Trivy)
-{table}
+{trivy_table}
+
+### Top findings (Grype)
+{grype_table}
 
 ### Scanners
 - Trivy: ✅ ({len(trivy_findings)} findings)
-- Syft: _pending_
-- Grype: _pending_
+- Syft: ✅ (SBOM generated)
+- Grype: ✅ ({len(grype_findings)} findings)
 - Semgrep: _pending_
 
 ---
