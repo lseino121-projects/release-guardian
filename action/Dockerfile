@@ -1,6 +1,5 @@
 FROM python:3.12-slim
 
-# Base utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -10,11 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy action code
 COPY entrypoint.sh /app/entrypoint.sh
-COPY rg /app/rg
+COPY ./rg /app/rg
 
-# Ensure entrypoint is executable
 RUN chmod +x /app/entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1
