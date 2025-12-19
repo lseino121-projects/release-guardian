@@ -3,11 +3,27 @@ from __future__ import annotations
 from typing import List
 
 from rg.normalize.schema import Finding
+from rg.normalize.dedupe import unified_summary
 from rg.models import RDIReport
 
 
 def _md(s: str | None) -> str:
     return (s or "").replace("|", "\\|")
+
+def _unified_table(unified: dict, limit: int = 5) -> str:
+    rows = unified.get("unified_top") or []
+    if not rows:
+        return "_No vulnerabilities._"
+    lines = [
+        "| Worst | Package | Version | Advisories | Tools |",
+        "|---|---|---|---|---|",
+    ]
+    for r in rows[:limit]:
+        lines.append(
+            f"| {_md((r.get('worst_severity') or '').upper())} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
+            f"{_md(', '.join(r.get('advisories') or []))} | {_md(', '.join(r.get('tools') or []))} |"
+        )
+    return "\n".join(lines)
 
 
 def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
@@ -30,6 +46,8 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
 
 def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype_findings: List[Finding]) -> str:
     marker = "<!-- release-guardian:rdi -->"
+    unified = unified_summary(trivy_findings + grype_findings)
+
 
     verdict = report.verdict
     score = report.rdi_score
@@ -47,6 +65,8 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype
     trivy_table = _top_findings_table(trivy_findings)
     grype_table = _top_findings_table(grype_findings)
 
+    unified_table = _unified_table(unified)
+
     md = f"""{marker}
 {header}
 
@@ -60,6 +80,13 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype
 
 ### Top findings (Grype)
 {grype_table}
+
+### Unified vulnerabilities
+- **Clusters (pkg@version):** {unified["clusters_count"]}
+- **Total advisories (all tools):** {unified["advisories_count"]}
+- **Worst severity:** {unified["worst_severity"].upper() if unified["worst_severity"] else "UNKNOWN"}
+
+{unified_table}
 
 ### Scanners
 - Trivy: ✅ ({len(trivy_findings)} findings)

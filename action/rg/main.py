@@ -7,6 +7,8 @@ from pathlib import Path
 from rg.github_context import load_context
 from rg.models import RDIReport
 
+from rg.normalize.dedupe import unified_summary
+
 from rg.scanners.trivy import run_trivy_fs
 from rg.normalize.trivy_norm import normalize_trivy
 
@@ -18,7 +20,6 @@ from rg.report.pr_comment import render_pr_comment_md
 
 
 def decide_placeholder(mode: str) -> tuple[str, int]:
-    # v1: always go
     return "go", 18
 
 
@@ -50,13 +51,16 @@ def main() -> int:
     grype_path = run_grype_from_sbom(str(sbom_path), out_dir=out_dir, timeout=600)
     grype_findings = normalize_grype(str(grype_path))
 
+    # --- Unified summary ---
+    unified = unified_summary(trivy_findings + grype_findings)
+
     verdict, score = decide_placeholder(args.mode)
 
     notes = [
+        f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
         f"Trivy findings: {len(trivy_findings)} (not gating yet).",
         f"Grype findings: {len(grype_findings)} (not gating yet).",
-        "Next: dedupe Trivy + Grype into a unified vulnerability set.",
-        "Decision engine will block only *introduced* high-risk findings (v1 policy).",
+        "Not gating yet (v1). Next: detect introduced vs pre-existing and gate only introduced high-risk.",
     ]
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
@@ -74,7 +78,7 @@ def main() -> int:
             "head_sha": ctx.head_sha,
         },
         notes=notes,
-        top_findings=[f.__dict__ for f in (trivy_findings + grype_findings)[:10]],
+        top_findings=unified.get("unified_top", [])[:10],
     )
 
     Path(args.out_json).write_text(json.dumps(report.to_dict(), indent=2))
