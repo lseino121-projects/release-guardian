@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Trivy (pinned) via GitHub Release .deb
 # Works even when Debian codename (e.g., trixie) isn't supported by the Trivy APT repo.
 ARG TRIVY_VERSION=0.57.1
+ARG SYFT_VERSION=1.6.0
+ARG GRYPE_VERSION=0.79.2
 
 RUN set -eux; \
   arch="$(dpkg --print-architecture)"; \
@@ -28,6 +30,36 @@ RUN set -eux; \
 
 # Fail fast if install didn't work
 RUN trivy --version
+
+RUN set -eux; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in \
+    amd64)  bin_arch="amd64" ;; \
+    arm64)  bin_arch="arm64" ;; \
+    *) echo "Unsupported arch: $arch"; exit 1 ;; \
+  esac; \
+  curl -fsSL -o /tmp/syft.tgz \
+    "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${bin_arch}.tar.gz"; \
+  tar -xzf /tmp/syft.tgz -C /tmp syft; \
+  mv /tmp/syft /usr/local/bin/syft; \
+  chmod +x /usr/local/bin/syft; \
+  rm -f /tmp/syft.tgz
+
+RUN set -eux; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in \
+    amd64)  bin_arch="amd64" ;; \
+    arm64)  bin_arch="arm64" ;; \
+    *) echo "Unsupported arch: $arch"; exit 1 ;; \
+  esac; \
+  curl -fsSL -o /tmp/grype.tgz \
+    "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_${bin_arch}.tar.gz"; \
+  tar -xzf /tmp/grype.tgz -C /tmp grype; \
+  mv /tmp/grype /usr/local/bin/grype; \
+  chmod +x /usr/local/bin/grype; \
+  rm -f /tmp/grype.tgz
+
+RUN syft version && grype version
 
 WORKDIR /app
 

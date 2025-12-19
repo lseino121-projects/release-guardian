@@ -6,16 +6,18 @@ from pathlib import Path
 
 from rg.github_context import load_context
 from rg.models import RDIReport
+
 from rg.scanners.trivy import run_trivy_fs
 from rg.normalize.trivy_norm import normalize_trivy
+
+from rg.scanners.syft import run_syft_sbom
+from rg.scanners.grype import run_grype_from_sbom
+from rg.normalize.grype_norm import normalize_grype
+
 from rg.report.pr_comment import render_pr_comment_md
 
 
 def decide_placeholder(mode: str) -> tuple[str, int]:
-    """
-    Placeholder decision engine.
-    Next step: replace with normalization + RDI scoring.
-    """
     # v1: always go
     return "go", 18
 
@@ -37,15 +39,23 @@ def main() -> int:
     workspace = "/github/workspace"
     out_dir = f"{workspace}/.rg/out"
 
-    # Run Trivy FS + normalize
+    # --- Trivy ---
     trivy_path = run_trivy_fs(workspace=workspace, out_dir=out_dir, timeout=600)
     trivy_findings = normalize_trivy(str(trivy_path))
+
+    # --- Syft -> SBOM ---
+    sbom_path = run_syft_sbom(workspace=workspace, out_dir=out_dir, timeout=600)
+
+    # --- Grype from SBOM ---
+    grype_path = run_grype_from_sbom(str(sbom_path), out_dir=out_dir, timeout=600)
+    grype_findings = normalize_grype(str(grype_path))
 
     verdict, score = decide_placeholder(args.mode)
 
     notes = [
         f"Trivy findings: {len(trivy_findings)} (not gating yet).",
-        "Next: add Syft + Grype for SBOM-based vulnerability correlation.",
+        f"Grype findings: {len(grype_findings)} (not gating yet).",
+        "Next: dedupe Trivy + Grype into a unified vulnerability set.",
         "Decision engine will block only *introduced* high-risk findings (v1 policy).",
     ]
 
@@ -64,11 +74,11 @@ def main() -> int:
             "head_sha": ctx.head_sha,
         },
         notes=notes,
-        top_findings=[f.__dict__ for f in trivy_findings[:10]],
+        top_findings=[f.__dict__ for f in (trivy_findings + grype_findings)[:10]],
     )
 
     Path(args.out_json).write_text(json.dumps(report.to_dict(), indent=2))
-    Path(args.out_md).write_text(render_pr_comment_md(report, trivy_findings))
+    Path(args.out_md).write_text(render_pr_comment_md(report, trivy_findings, grype_findings))
     return 0
 
 
