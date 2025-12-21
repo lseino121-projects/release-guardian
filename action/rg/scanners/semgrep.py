@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-
+import json
 from rg.scanners.common import run_cmd
 
 
@@ -9,7 +9,7 @@ def run_semgrep(
     workspace: str,
     out_dir: str,
     timeout: int = 900,
-    config: str = "p/security-audit",
+    config: str = "rg/rules",
 ) -> Path:
     """
     Run Semgrep on the repo and emit JSON output.
@@ -37,5 +37,11 @@ def run_semgrep(
         raise RuntimeError(
             f"semgrep failed (exit={code}). stderr={stderr.strip()[:2000]}"
         )
+
+    data = json.loads(out_path.read_text())
+    errors = data.get("errors") or []
+    if errors:
+        # keep it short; semgrep can be verbose
+        raise RuntimeError(f"semgrep returned {len(errors)} errors; first={str(errors[0])[:500]}")
 
     return out_path
