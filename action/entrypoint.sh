@@ -22,6 +22,9 @@ mkdir -p "${REPORT_DIR}"
 REPORT_JSON="${REPORT_DIR}/report.json"
 REPORT_MD="${REPORT_DIR}/comment.md"
 
+# Git safety: container UID may not match mounted workspace ownership
+git config --global --add safe.directory /github/workspace || true
+
 echo "Event path: ${GITHUB_EVENT_PATH}"
 echo "Repo: ${GITHUB_REPOSITORY}"
 echo "SHA: ${GITHUB_SHA}"
