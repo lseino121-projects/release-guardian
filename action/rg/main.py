@@ -104,7 +104,10 @@ def main() -> int:
         findings=deps_findings,
         introduced_clusters=classified["introduced"],
         introduced_semgrep_findings=introduced_semgrep_findings,
+        node_baseline_status=node_baseline_status,
+        semgrep_baseline_status=semgrep_baseline.status,
     )
+
 
     # -------------------------
     # 5) Introduced Risk summary (single narrative payload)
