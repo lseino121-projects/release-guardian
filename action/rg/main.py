@@ -3,17 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from rg.rdi.introduced_semgrep import introduced_semgrep_from_pr
-from rg.normalize.semgrep_norm import normalize_semgrep
 
 from rg.github_context import load_context
 from rg.models import RDIReport
 
 from rg.normalize.dedupe import unified_summary
-from rg.scanners.semgrep import run_semgrep
-
-from rg.rdi.introduced_node import introduced_packages_from_pr
-from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 
 from rg.scanners.trivy import run_trivy_fs
 from rg.normalize.trivy_norm import normalize_trivy
@@ -21,6 +15,13 @@ from rg.normalize.trivy_norm import normalize_trivy
 from rg.scanners.syft import run_syft_sbom
 from rg.scanners.grype import run_grype_from_sbom
 from rg.normalize.grype_norm import normalize_grype
+
+from rg.scanners.semgrep import run_semgrep
+from rg.normalize.semgrep_norm import normalize_semgrep
+
+from rg.rdi.introduced_node import introduced_packages_from_pr
+from rg.rdi.introduced_semgrep import introduced_semgrep_from_pr
+from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 
 from rg.report.pr_comment import render_pr_comment_md
 
@@ -41,20 +42,25 @@ def main() -> int:
 
     workspace = "/github/workspace"
     out_dir = f"{workspace}/.rg/out"
+    semgrep_config = "action/rg/rules"  # local deterministic rules inside repo
 
-    # --- Trivy ---
+    # -------------------------
+    # 1) Dependency scanners (v1 gating scope)
+    # -------------------------
     trivy_path = run_trivy_fs(workspace=workspace, out_dir=out_dir, timeout=600)
     trivy_findings = normalize_trivy(str(trivy_path))
 
-    # --- Syft -> SBOM ---
     sbom_path = run_syft_sbom(workspace=workspace, out_dir=out_dir, timeout=600)
 
-    # --- Grype from SBOM ---
     grype_path = run_grype_from_sbom(str(sbom_path), out_dir=out_dir, timeout=600)
     grype_findings = normalize_grype(str(grype_path))
 
-    # --- Semgrep (SAST) ---
-    semgrep_config = "action/rg/rules"  # local deterministic rules inside repo
+    deps_findings = trivy_findings + grype_findings
+    unified = unified_summary(deps_findings)
+
+    # -------------------------
+    # 2) Semgrep (head scan for reporting table)
+    # -------------------------
     semgrep_path = run_semgrep(
         workspace=workspace,
         out_dir=out_dir,
@@ -63,16 +69,21 @@ def main() -> int:
     )
     semgrep_findings = normalize_semgrep(str(semgrep_path))
 
-
-    deps_findings = trivy_findings + grype_findings  # gating scope (v1)
-    unified = unified_summary(deps_findings)
-    all_findings = deps_findings
-
-    # --- Introduced vs pre-existing (Node-first) ---
+    # -------------------------
+    # 3) Introduced vs pre-existing baselines
+    # -------------------------
     base_sha = ctx.base_sha or ""
     head_sha = ctx.head_sha or ""
 
-    # --- Semgrep introduced vs pre-existing (report-only for now) ---
+    # Node baseline (for introduced deps)
+    node_baseline = introduced_packages_from_pr(base_sha, head_sha, repo_dir=workspace)
+    changed_pkgs = node_baseline.changed
+    node_baseline_status = node_baseline.status
+    diff_unavailable = node_baseline_status != "OK"
+
+    classified = classify_clusters(deps_findings, changed_pkgs)
+
+    # Semgrep baseline (introduced SAST)
     semgrep_baseline = introduced_semgrep_from_pr(
         base_ref=base_sha,
         head_ref=head_sha,
@@ -81,29 +92,25 @@ def main() -> int:
         timeout=900,
     )
     introduced_semgrep_findings = semgrep_baseline.introduced
+    preexisting_semgrep_findings = semgrep_baseline.preexisting  # not required yet, but useful later
 
-    baseline = introduced_packages_from_pr(base_sha, head_sha, repo_dir=workspace)
-    changed_pkgs = baseline.changed
-    node_baseline_status = baseline.status
-
-    classified = classify_clusters(all_findings, changed_pkgs)
-
+    # -------------------------
+    # 4) Gating (introduced-only, deps + semgrep)
+    # -------------------------
     verdict, score, gate_notes = gate_verdict(
         mode=args.mode,
         threshold=args.severity_threshold,
         allow_conditional=args.allow_conditional,
-        findings=all_findings,
+        findings=deps_findings,
         introduced_clusters=classified["introduced"],
+        introduced_semgrep_findings=introduced_semgrep_findings,
     )
-
-    # baseline not OK means we couldn't do a normal base-vs-head diff
-    diff_unavailable = node_baseline_status != "OK"
 
     notes = [
         f"Node baseline status: {node_baseline_status}",
         f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
         f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
-        f"Semgrep findings: {len(semgrep_findings)} (reporting only; not gating yet).",
+        f"Semgrep findings (head): {len(semgrep_findings)}",
         f"Semgrep baseline status: {semgrep_baseline.status} | Introduced: {len(introduced_semgrep_findings)} | Total(head): {semgrep_baseline.head_count}",
         *gate_notes,
     ]
@@ -134,7 +141,7 @@ def main() -> int:
             "lockfile_diff_unavailable": diff_unavailable,
             "semgrep_baseline_status": semgrep_baseline.status,
             "semgrep_introduced_count": len(introduced_semgrep_findings),
-
+            "semgrep_preexisting_count": len(preexisting_semgrep_findings),
         },
         notes=notes[:15],  # tighten once stable
         top_findings=unified.get("unified_top", [])[:10],
@@ -150,7 +157,6 @@ def main() -> int:
             introduced_semgrep_findings,
         )
     )
-
 
     return 0
 
