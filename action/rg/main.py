@@ -146,11 +146,10 @@ def main() -> int:
     # -------------------------
     # Keep these tight; the comment renderer takes the first N lines.
     notes = [
-        # The product narrative: what this PR INTRODUCES
-        f"Introduced risk: deps={len(classified['introduced'])} clusters, code={len(introduced_semgrep_findings)} findings.",
-        f"Worst introduced severity: {(introduced_overall_worst or 'none').upper()} | Sources: {', '.join(introduced_sources) if introduced_sources else 'none'}.",
-        # Baseline health (kept short)
+        # Baseline health (short, factual)
         f"Baselines: node={node_baseline_status}, semgrep={semgrep_baseline.status}.",
+
+        # Decision narrative (single source of truth)
         *gate_notes,
     ]
 

@@ -49,7 +49,6 @@ def _worst_severity(findings: List[Finding]) -> Optional[str]:
             worst = f.severity
     return worst
 
-
 def gate_verdict(
     mode: str,
     threshold: str,
@@ -68,10 +67,8 @@ def gate_verdict(
     allow_conditional_bool = str(allow_conditional).lower() in ("1", "true", "yes", "y")
     thr_rank = _rank(threshold)
 
-    notes: list[str] = []
-
     # -------------------------
-    # Introduced deps (existing)
+    # Introduced deps
     # -------------------------
     introduced_set = set(introduced_clusters)
     introduced_dep_findings = [
@@ -79,46 +76,58 @@ def gate_verdict(
     ]
     dep_worst = _worst_severity(introduced_dep_findings)
 
-    notes.append(f"Introduced clusters: {len(introduced_clusters)}")
-    notes.append(f"Introduced advisories: {len(introduced_dep_findings)}")
-
     # -------------------------
-    # Introduced Semgrep (new)
+    # Introduced Semgrep
     # -------------------------
     introduced_semgrep_findings = introduced_semgrep_findings or []
     semgrep_worst = _worst_severity(introduced_semgrep_findings)
 
-    notes.append(f"Introduced Semgrep findings: {len(introduced_semgrep_findings)}")
+    # Counts for a single compact summary line (optional but helpful)
+    introduced_dep_clusters_ct = len(introduced_clusters)
+    introduced_dep_advisories_ct = len(introduced_dep_findings)
+    introduced_code_ct = len(introduced_semgrep_findings)
 
     # If nothing introduced anywhere -> GO
-    if not introduced_dep_findings and not introduced_semgrep_findings:
-        return "go", score, notes + ["No introduced vulnerabilities or code findings detected."]
+    if introduced_dep_advisories_ct == 0 and introduced_code_ct == 0:
+        return "go", score, ["No introduced risk detected (deps or code)."]
 
     # Determine if either source meets/exceeds threshold
     dep_meets = dep_worst is not None and _rank(dep_worst) <= thr_rank
     semgrep_meets = semgrep_worst is not None and _rank(semgrep_worst) <= thr_rank
 
-    if dep_worst:
-        notes.append(f"Worst introduced dependency severity: {dep_worst.upper()}")
-    if semgrep_worst:
-        notes.append(f"Worst introduced Semgrep severity: {semgrep_worst.upper()}")
+    # Worst overall + sources (for your “Why” line)
+    worst = None
+    sources: list[str] = []
+    if dep_worst is not None:
+        worst = dep_worst
+        sources.append("deps")
+    if semgrep_worst is not None:
+        if worst is None or _rank(semgrep_worst) < _rank(worst):
+            worst = semgrep_worst
+        sources.append("code")
 
-    # If not enforce -> always conditional when anything introduced exists
+    worst_str = worst.upper() if worst else "UNKNOWN"
+    sources_str = ", ".join(sources) if sources else "unknown"
+
+    # 1) Compact risk summary line (this replaces the noisy counters)
+    summary_line = (
+        f"Introduced risk: deps={introduced_dep_clusters_ct} clusters/{introduced_dep_advisories_ct} advisories, "
+        f"code={introduced_code_ct} findings. Worst={worst_str} (sources: {sources_str})."
+    )
+
+    # 2) Decision line (single narrative)
     if mode != "enforce":
-        return "conditional", score, notes + ["Mode is not enforce; reporting only."]
+        return "conditional", score, [summary_line, f"Reporting-only (mode={mode})."]
 
-    # Enforce mode: block if introduced meets/exceeds threshold
     if dep_meets or semgrep_meets:
-        reason_bits = []
-        if dep_meets:
-            reason_bits.append("dependencies")
-        if semgrep_meets:
-            reason_bits.append("code")
-        reason = " & ".join(reason_bits)
+        return_value = "conditional" if allow_conditional_bool else "no-go"
+        return (
+            return_value,
+            score,
+            [
+                summary_line,
+                f"Introduced risk meets/exceeds threshold ({threshold.upper()}).",
+            ],
+        )
 
-        msg = f"Introduced {reason} findings meet/exceed threshold ({threshold.upper()})."
-        if allow_conditional_bool:
-            return "conditional", score, notes + [msg]
-        return "no-go", score, notes + [msg]
-
-    return "go", score, notes + ["Introduced findings are below threshold."]
+    return "go", score, [summary_line, f"Introduced risk is below threshold ({threshold.upper()})."]
