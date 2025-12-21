@@ -1,0 +1,8 @@
+rules:
+  - id: rg.js.child-process-exec
+    languages: [javascript, typescript]
+    message: "Dangerous command execution via child_process.exec. Prefer execFile/spawn with args array."
+    severity: ERROR
+    pattern-either:
+      - pattern: child_process.exec(...)
+      - pattern: require('child_process').exec(...)

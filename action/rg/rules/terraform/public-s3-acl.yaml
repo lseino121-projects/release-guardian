@@ -1,0 +1,8 @@
+rules:
+  - id: rg.tf.s3-public-acl
+    languages: [terraform]
+    message: "S3 bucket ACL is public. Avoid public-read/public-read-write."
+    severity: ERROR
+    pattern-either:
+      - pattern: acl = "public-read"
+      - pattern: acl = "public-read-write"

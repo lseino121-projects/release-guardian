@@ -22,8 +22,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Release Guardian
         uses: ./action
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          mode: enforce
+          severity_threshold: high
+          allow_conditional: false
