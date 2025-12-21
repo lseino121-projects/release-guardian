@@ -117,8 +117,20 @@ def introduced_packages_from_pr(
     base_txt = _git_show(repo_dir, base_ref, lock_path)
     head_txt = _git_show(repo_dir, head_ref, lock_path)
 
+    if not head_txt:
+        return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
+
+    # If lockfile is introduced in this PR (missing on base, present on head),
+    # treat all head packages as introduced.
+    if not base_txt and head_txt:
+        head_lock = _load_lock_json(head_txt)
+        head_pkgs = _extract_packages(head_lock)
+        return {name: (None, ver) for name, ver in head_pkgs.items()}
+
+    # Otherwise require both sides for a diff
     if not base_txt or not head_txt:
         return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
+
 
     base_lock = _load_lock_json(base_txt)
     head_lock = _load_lock_json(head_txt)
