@@ -1,203 +1,29 @@
-# Release Guardian
+# Release Guardian (GitHub Action)
 
-**Release Guardian** is a decision engine for pull requests.
+Release Guardian implements **Release Decision Intelligence (RDI)**: it runs security scanners and produces **one clear, explainable verdict per PR**.
 
-It answers one question clearly and consistently:
+> v1 is under active development. Current version is a scaffold that posts a placeholder verdict.
 
-> **“Is the risk introduced by this PR acceptable to ship?”**
-
-Release Guardian does not enumerate everything that is wrong in a codebase.  
-It focuses on **introduced risk**, **confidence**, and **decisions at merge time**.
-
----
-
-## The problem
-
-Most security tools answer:
-
-- “What vulnerabilities exist in this repository?”
-
-Engineering teams actually need:
-
-- **“What risk does *this change* introduce?”**
-- **“How severe is it?”**
-- **“How confident are we in that assessment?”**
-- **“Should we ship?”**
-
-Without this distinction:
-- Legacy vulnerabilities permanently block delivery
-- PRs become noisy and un-actionable
-- Teams either ignore security or stop shipping
-
-Release Guardian exists to fix that.
-
----
-
-## What Release Guardian does
-
-Release Guardian evaluates **introduced risk only** and produces a **clear release decision** at PR time.
-
-It combines:
-- Dependency risk (Trivy + Syft + Grype)
-- Code risk (Semgrep)
-- Baseline confidence (how reliable the comparison is)
-
-Into:
-- A single verdict
-- A transparent explanation
-- A calibrated score (RDI)
-
----
-
-## Core concepts
-
-### 1. Introduced risk (not total risk)
-
-Release Guardian distinguishes between:
-
-- **Pre-existing risk** — already in `main`
-- **Introduced risk** — added by the current PR
-
-Only **introduced risk** can block a release.
-
-This prevents historical debt from freezing forward progress.
-
----
-
-### 2. Unified dependency + code analysis
-
-Introduced risk is evaluated across:
-
-- **Dependencies**
-  - SBOM generated with Syft
-  - Vulnerabilities clustered across Trivy + Grype
-- **Code**
-  - Semgrep findings introduced by the PR only
-
-Both are evaluated under a **single policy and severity model**.
-
----
-
-### 3. Baseline confidence
-
-If a baseline comparison is imperfect (e.g. new lockfile, unavailable ref):
-
-- Release Guardian still produces a decision
-- A **confidence penalty** is applied to the score
-- The uncertainty is explicitly stated in the PR comment
-
-This avoids false certainty while keeping teams moving.
-
----
-
-### 4. RDI — Release Decision Index
-
-Each PR receives an **RDI score (0–100)**:
-
-- Higher = safer to ship
-- Derived from:
-  - Worst introduced severity
-  - Volume of introduced findings
-  - Risk surface (deps + code)
-  - Baseline confidence
-
-RDI is a **decision signal**, not a vanity metric.
-
----
-
-### 5. Clear outcomes
-
-Release Guardian always returns one of three outcomes:
-
-| Verdict | Meaning |
-|---|---|
-| **Go** | Safe to ship |
-| **Conditional** | Risk introduced, but acceptable |
-| **No-Go** | Introduced risk exceeds policy |
-
-These outcomes map directly to GitHub commit statuses.
-
----
-
-## PR experience
-
-At a glance, reviewers see:
-
-- **Verdict + RDI score**
-- **Why** the decision was made (1–2 sentences)
-- **Introduced risk summary**
-  - Dependency clusters introduced
-  - Code findings introduced
-- **Expandable details**
-  - Trivy
-  - Grype
-  - Semgrep
-- **Visual severity indicators** for instant scanning
-
-The goal: **fast understanding, not security expertise.**
-
----
-
-## Example output
-⚠️ Markdown issues: A few formatting breaks
-⚠️ Example output section: Needs minor polish for professionalism
-⚠️ Config table: Broken formatting
-
----
-
-```Details are available below — but the decision is immediate.```
-## Configuration (v1)
-
-Release Guardian is intentionally opinionated in v1.
-
-### Example GitHub workflow
+## Usage
 
 ```yaml
-- name: Release Guardian
-  uses: ./action
-  with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    mode: enforce
-    severity_threshold: high
-    allow_conditional: false
+name: Release Guardian
 
-### Inputs
+on:
+  pull_request:
 
-| Input | Description |
-|---|---|
-| `mode` | `enforce` or reporting-only |
-| `severity_threshold` | Minimum severity that can block a release |
-| `allow_conditional` | Allow **Conditional** instead of **No-Go** |
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
 
----
+jobs:
+  rdi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-
-```markdown
-## What Release Guardian is not
-
-- ❌ A vulnerability scanner  
-- ❌ A compliance checklist  
-- ❌ A dashboard-first product  
-
-Release Guardian is a **decision layer**, not another source of noise.
-
-## Roadmap (post-v1)
-
-Planned, but intentionally not part of v1:
-
-- Organization-level policy packs
-- RDI trends over time (PR → main)
-- “Why this matters” remediation context
-- Suppressions with expiration and justification
-- SaaS control plane
-
-## Philosophy
-
-> Security should help teams ship safely — not stop them from shipping forever.
-
-Release Guardian makes risk:
-
-- Introduced  
-- Visible  
-- Actionable  
-- Decidable
+      - name: Release Guardian
+        uses: lseino121-projects/release-guardian@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
