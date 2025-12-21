@@ -47,7 +47,9 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
 def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype_findings: List[Finding]) -> str:
     marker = "<!-- release-guardian:rdi -->"
     unified = unified_summary(trivy_findings + grype_findings)
-
+    introduced_ct = int(report.context.get("introduced_clusters", 0) or 0)
+    preexisting_ct = int(report.context.get("preexisting_clusters", 0) or 0)
+    changed_pkgs_ct = int(report.context.get("changed_pkgs_count", 0) or 0)
 
     verdict = report.verdict
     score = report.rdi_score
@@ -85,6 +87,7 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype
 - **Clusters (pkg@version):** {unified["clusters_count"]}
 - **Total advisories (all tools):** {unified["advisories_count"]}
 - **Worst severity:** {unified["worst_severity"].upper() if unified["worst_severity"] else "UNKNOWN"}
+- **Introduced clusters:** {introduced_ct} | **Pre-existing clusters:** {preexisting_ct} | **Changed packages:** {changed_pkgs_ct}
 
 {unified_table}
 

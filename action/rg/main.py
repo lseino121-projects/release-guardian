@@ -6,6 +6,8 @@ from pathlib import Path
 
 from rg.github_context import load_context
 from rg.models import RDIReport
+from rg.rdi.introduced_node import introduced_packages_from_pr
+from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 
 from rg.normalize.dedupe import unified_summary
 
@@ -17,11 +19,6 @@ from rg.scanners.grype import run_grype_from_sbom
 from rg.normalize.grype_norm import normalize_grype
 
 from rg.report.pr_comment import render_pr_comment_md
-
-
-def decide_placeholder(mode: str) -> tuple[str, int]:
-    return "go", 18
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -53,14 +50,23 @@ def main() -> int:
 
     # --- Unified summary ---
     unified = unified_summary(trivy_findings + grype_findings)
+    all_findings = trivy_findings + grype_findings
 
-    verdict, score = decide_placeholder(args.mode)
+    changed_pkgs = introduced_packages_from_pr(ctx.base_sha, ctx.head_sha)
+    classified = classify_clusters(all_findings, changed_pkgs)
+
+    verdict, score, gate_notes = gate_verdict(
+        mode=args.mode,
+        threshold=args.severity_threshold,
+        allow_conditional=args.allow_conditional,
+        findings=all_findings,
+        introduced_clusters=classified["introduced"],
+    )
 
     notes = [
         f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
-        f"Trivy findings: {len(trivy_findings)} (not gating yet).",
-        f"Grype findings: {len(grype_findings)} (not gating yet).",
-        "Not gating yet (v1). Next: detect introduced vs pre-existing and gate only introduced high-risk.",
+        f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
+        *gate_notes,
     ]
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
@@ -76,6 +82,10 @@ def main() -> int:
             "pr_number": ctx.pr_number,
             "base_sha": ctx.base_sha,
             "head_sha": ctx.head_sha,
+            "introduced_clusters": len(classified["introduced"]),
+            "preexisting_clusters": len(classified["preexisting"]),
+            "changed_pkgs_count": len(changed_pkgs),
+
         },
         notes=notes,
         top_findings=unified.get("unified_top", [])[:10],
