@@ -139,16 +139,20 @@ The goal: **fast understanding, not security expertise.**
 ---
 
 ## Example output
-  - ⚠️ Markdown issues: A few formatting breaks
-  - ⚠️ Example output section: Needs minor polish for professionalism
-  - ⚠️ Config table: Broken formatting
+
+**❌ No-Go — RDI 23**
+
+- Introduced risk: deps=1 cluster / 4 advisories, code=2 findings  
+- Worst = **CRITICAL** (sources: deps, code)  
+- Decision: introduced risk meets/exceeds threshold (**HIGH**)  
+
+_“Details are available below — but the decision is immediate.”_
 
 ---
 
-```Details are available below — but the decision is immediate.```
 ## Configuration (v1)
 
-Release Guardian is intentionally opinionated in v1.
+Release Guardian is intentionally opinionated in v1: **introduced risk only**, with a **single policy gate**.
 
 ### Example GitHub workflow
 
@@ -177,25 +181,25 @@ Release Guardian is intentionally opinionated in v1.
 - ❌ A compliance checklist  
 - ❌ A dashboard-first product  
 
-Release Guardian is a **decision layer**, not another source of noise.
+Release Guardian is a **decision layer** — it turns multiple security signals into one merge-time outcome.
 
 ## Roadmap (post-v1)
 
 Planned, but intentionally not part of v1:
 
-- Organization-level policy packs
-- RDI trends over time (PR → main)
-- “Why this matters” remediation context
-- Suppressions with expiration and justification
-- SaaS control plane
+- Organization-level policy packs (shared rules across repos)
+- RDI trend over time (PR → main)
+- “Why this matters” remediation context per finding
+- Suppressions with expiration + justification
+- SaaS control plane (optional)
 
 ## Philosophy
 
-> Security should help teams ship safely — not stop them from shipping forever.
+> Security should help teams ship safely — not stop shipping forever.
 
 Release Guardian makes risk:
 
 - Introduced  
 - Visible  
 - Actionable  
-- Decidable
+- Decidable 
