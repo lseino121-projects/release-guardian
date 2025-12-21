@@ -139,9 +139,9 @@ The goal: **fast understanding, not security expertise.**
 ---
 
 ## Example output
-⚠️ Markdown issues: A few formatting breaks
-⚠️ Example output section: Needs minor polish for professionalism
-⚠️ Config table: Broken formatting
+  - ⚠️ Markdown issues: A few formatting breaks
+  - ⚠️ Example output section: Needs minor polish for professionalism
+  - ⚠️ Config table: Broken formatting
 
 ---
 
@@ -160,7 +160,7 @@ Release Guardian is intentionally opinionated in v1.
     mode: enforce
     severity_threshold: high
     allow_conditional: false
-
+```
 ### Inputs
 
 | Input | Description |
