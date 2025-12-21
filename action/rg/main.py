@@ -106,19 +106,58 @@ def main() -> int:
         introduced_semgrep_findings=introduced_semgrep_findings,
     )
 
+    # -------------------------
+    # 5) Introduced Risk summary (single narrative payload)
+    # -------------------------
+    SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+    def _rank(sev: str | None) -> int:
+        return SEV_RANK.get((sev or "").lower(), 99)
+
+    def _worst(findings_list) -> str | None:
+        worst_sev: str | None = None
+        for f in findings_list:
+            if worst_sev is None or _rank(getattr(f, "severity", None)) < _rank(worst_sev):
+                worst_sev = getattr(f, "severity", None)
+        return worst_sev
+
+    introduced_cluster_set = set(classified["introduced"])
+    introduced_dep_findings = [
+        f for f in deps_findings if (f.package, f.installed_version) in introduced_cluster_set
+    ]
+    introduced_dep_worst = _worst(introduced_dep_findings)
+    introduced_code_worst = _worst(introduced_semgrep_findings)
+
+    introduced_any = bool(introduced_dep_findings) or bool(introduced_semgrep_findings)
+    introduced_sources: list[str] = []
+    if introduced_dep_findings:
+        introduced_sources.append("deps")
+    if introduced_semgrep_findings:
+        introduced_sources.append("code")
+
+    # overall worst across deps+code
+    introduced_overall_worst: str | None = None
+    for sev in [introduced_dep_worst, introduced_code_worst]:
+        if sev and (introduced_overall_worst is None or _rank(sev) < _rank(introduced_overall_worst)):
+            introduced_overall_worst = sev
+
+    # -------------------------
+    # 6) Notes ("Why") — tie to vision
+    # -------------------------
+    # Keep these tight; the comment renderer takes the first N lines.
     notes = [
-        f"Node baseline status: {node_baseline_status}",
-        f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
-        f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
-        f"Semgrep findings (head): {len(semgrep_findings)}",
-        f"Semgrep baseline status: {semgrep_baseline.status} | Introduced: {len(introduced_semgrep_findings)} | Total(head): {semgrep_baseline.head_count}",
+        # The product narrative: what this PR INTRODUCES
+        f"Introduced risk: deps={len(classified['introduced'])} clusters, code={len(introduced_semgrep_findings)} findings.",
+        f"Worst introduced severity: {(introduced_overall_worst or 'none').upper()} | Sources: {', '.join(introduced_sources) if introduced_sources else 'none'}.",
+        # Baseline health (kept short)
+        f"Baselines: node={node_baseline_status}, semgrep={semgrep_baseline.status}.",
         *gate_notes,
     ]
 
+    # Optional debug-ish note (only when baseline is not OK)
     if diff_unavailable:
         notes.append(
-            "Baseline not OK for Node lockfile. If status=BASE_MISSING, all head deps are treated as introduced (expected). "
-            "If status=REF_UNAVAILABLE, fix git checkout/fetch."
+            "Node baseline not OK (e.g., BASE_MISSING means lockfile introduced; expected). REF_UNAVAILABLE means the SHAs weren’t fetchable."
         )
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
@@ -134,19 +173,30 @@ def main() -> int:
             "pr_number": ctx.pr_number,
             "base_sha": ctx.base_sha,
             "head_sha": ctx.head_sha,
+
+            # existing counters
             "introduced_clusters": len(classified["introduced"]),
             "preexisting_clusters": len(classified["preexisting"]),
             "changed_pkgs_count": len(changed_pkgs),
+            "introduced_clusters_list": classified["introduced"],
+
+            # baseline metadata
             "node_baseline_status": node_baseline_status,
             "lockfile_diff_unavailable": diff_unavailable,
             "semgrep_baseline_status": semgrep_baseline.status,
             "semgrep_introduced_count": len(introduced_semgrep_findings),
             "semgrep_preexisting_count": len(preexisting_semgrep_findings),
-            "introduced_clusters_list": classified["introduced"],
+
+            # NEW: introduced-risk “policy plumbing” fields
+            "introduced_dep_advisories_count": len(introduced_dep_findings),
+            "introduced_code_findings_count": len(introduced_semgrep_findings),
+            "introduced_worst_severity": introduced_overall_worst,
+            "introduced_sources": introduced_sources,  # ["deps", "code"]
         },
-        notes=notes[:15],  # tighten once stable
+        notes=notes[:10],  # keep it crisp; pr_comment uses first ~6 anyway
         top_findings=unified.get("unified_top", [])[:10],
     )
+
 
     Path(args.out_json).write_text(json.dumps(report.to_dict(), indent=2))
     Path(args.out_md).write_text(
