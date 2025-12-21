@@ -66,7 +66,9 @@ def render_pr_comment_md(
     trivy_findings: List[Finding],
     grype_findings: List[Finding],
     semgrep_findings: List[Finding],
+    introduced_semgrep_findings: List[Finding],
 ) -> str:
+
     marker = "<!-- release-guardian:rdi -->"
     unified = unified_summary(trivy_findings + grype_findings)
     introduced_ct = int(report.context.get("introduced_clusters", 0) or 0)
@@ -89,7 +91,7 @@ def render_pr_comment_md(
     trivy_table = _top_findings_table(trivy_findings)
     grype_table = _top_findings_table(grype_findings)
     semgrep_table = _semgrep_table(semgrep_findings)
-
+    introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings)
 
     unified_table = _unified_table(unified)
 
@@ -109,6 +111,9 @@ def render_pr_comment_md(
 
 ### Top findings (Semgrep)
 {semgrep_table}
+
+### Introduced findings (Semgrep)
+{introduced_semgrep_table}
 
 ### Unified vulnerabilities
 - **Clusters (pkg@version):** {unified["clusters_count"]}

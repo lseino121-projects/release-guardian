@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from rg.rdi.introduced_semgrep import introduced_semgrep_from_pr
+from rg.normalize.semgrep_norm import normalize_semgrep
 
 from rg.github_context import load_context
 from rg.models import RDIReport
 
 from rg.normalize.dedupe import unified_summary
 from rg.scanners.semgrep import run_semgrep
-from rg.normalize.semgrep_norm import normalize_semgrep
 
 from rg.rdi.introduced_node import introduced_packages_from_pr
 from rg.rdi.policy_v1 import classify_clusters, gate_verdict
@@ -64,6 +65,16 @@ def main() -> int:
     base_sha = ctx.base_sha or ""
     head_sha = ctx.head_sha or ""
 
+    # --- Semgrep introduced vs pre-existing (report-only for now) ---
+    semgrep_baseline = introduced_semgrep_from_pr(
+        base_ref=base_sha,
+        head_ref=head_sha,
+        repo_dir=workspace,
+        config="p/security-audit",
+        timeout=900,
+    )
+    introduced_semgrep_findings = semgrep_baseline.introduced
+
     baseline = introduced_packages_from_pr(base_sha, head_sha, repo_dir=workspace)
     changed_pkgs = baseline.changed
     node_baseline_status = baseline.status
@@ -86,6 +97,7 @@ def main() -> int:
         f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
         f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
         f"Semgrep findings: {len(semgrep_findings)} (reporting only; not gating yet).",
+        f"Semgrep baseline status: {semgrep_baseline.status} | Introduced: {len(introduced_semgrep_findings)} | Total(head): {semgrep_baseline.head_count}",
         *gate_notes,
     ]
 
@@ -113,13 +125,26 @@ def main() -> int:
             "changed_pkgs_count": len(changed_pkgs),
             "node_baseline_status": node_baseline_status,
             "lockfile_diff_unavailable": diff_unavailable,
+            "semgrep_baseline_status": semgrep_baseline.status,
+            "semgrep_introduced_count": len(introduced_semgrep_findings),
+
         },
         notes=notes[:15],  # tighten once stable
         top_findings=unified.get("unified_top", [])[:10],
     )
 
     Path(args.out_json).write_text(json.dumps(report.to_dict(), indent=2))
-    Path(args.out_md).write_text(render_pr_comment_md(report, trivy_findings, grype_findings, semgrep_findings))
+    Path(args.out_md).write_text(
+        render_pr_comment_md(
+            report,
+            trivy_findings,
+            grype_findings,
+            semgrep_findings,
+            introduced_semgrep_findings,
+        )
+    )
+
+
     return 0
 
 
