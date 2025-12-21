@@ -109,18 +109,31 @@ def render_pr_comment_md(
     preexisting_ct = int(report.context.get("preexisting_clusters", 0) or 0)
     changed_pkgs_ct = int(report.context.get("changed_pkgs_count", 0) or 0)
 
-    # Prefer explicit list (best). If missing, we can't filter precisely, so display a hint.
-    introduced_clusters = report.context.get("introduced_clusters_list") or []
+    # Important: distinguish between "not provided" (None) vs "provided but empty" ([]).
+    introduced_clusters_raw = report.context.get("introduced_clusters_list", None)
 
-    if introduced_clusters:
-        introduced_deps = unified_summary_for_clusters(deps_findings, introduced_clusters)
-        introduced_deps_table = _unified_table(introduced_deps)
-        introduced_deps_note = ""
-    else:
+    introduced_deps_note = ""
+    if introduced_clusters_raw is None:
+        # Truly missing: we can't filter precisely.
         introduced_deps_table = "_(Introduced dependency clusters list not provided to renderer yet.)_"
-        introduced_deps_note = "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
+        introduced_deps_note = (
+            "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
+        )
+    else:
+        # Provided (could be empty list, which is a valid/normal case).
+        introduced_clusters = introduced_clusters_raw or []
+        if not introduced_clusters:
+            introduced_deps_table = "_No introduced dependency vulnerabilities._"
+        else:
+            introduced_deps = unified_summary_for_clusters(deps_findings, introduced_clusters)
+            introduced_deps_table = _unified_table(introduced_deps)
 
     introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings)
+
+    # Semgrep baseline counts (optional but helps explain "why GO even with findings on HEAD")
+    semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
+    semgrep_pre = int(report.context.get("semgrep_preexisting_count", 0) or 0)
+    semgrep_baseline_line = f"_Baseline: introduced={semgrep_intro}, preexisting={semgrep_pre}_"
 
     verdict = report.verdict
     score = report.rdi_score
@@ -135,7 +148,7 @@ def render_pr_comment_md(
     notes = (report.notes or [])[:6]
     why_lines = "\n".join([f"- {_md(n)}" for n in notes]) if notes else "- (No notes)"
 
-    # “details” sections (keep the comment tight)
+    # details sections
     trivy_table = _top_findings_table(trivy_findings)
     grype_table = _top_findings_table(grype_findings)
     semgrep_table = _semgrep_table(semgrep_findings)
@@ -171,7 +184,9 @@ def render_pr_comment_md(
 </details>
 
 <details>
-<summary><b>Details: Top findings (Semgrep)</b></summary>
+<summary><b>Details: Semgrep findings on HEAD</b></summary>
+
+{semgrep_baseline_line}
 
 {semgrep_table}
 </details>
