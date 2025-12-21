@@ -8,16 +8,34 @@ from typing import Dict, Tuple, Optional
 def _git_show(ref: str, path: str) -> Optional[str]:
     """
     Return file contents at git ref, or None if file doesn't exist.
+    If the ref isn't present locally (common in PR merge checkouts),
+    attempt to fetch it from origin and retry.
     """
+    def try_show() -> Optional[str]:
+        try:
+            return subprocess.check_output(
+                ["git", "show", f"{ref}:{path}"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            return None
+
+    out = try_show()
+    if out is not None:
+        return out
+
+    # Try fetching the object by SHA
     try:
-        out = subprocess.check_output(
-            ["git", "show", f"{ref}:{path}"],
-            text=True,
+        subprocess.check_call(
+            ["git", "fetch", "--no-tags", "--prune", "origin", ref],
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return out
     except subprocess.CalledProcessError:
         return None
+
+    return try_show()
 
 
 def _load_lock_json(text: str) -> dict:
@@ -71,7 +89,8 @@ def introduced_packages_from_pr(base_ref: str, head_ref: str, lock_path: str = "
     head_txt = _git_show(head_ref, lock_path)
 
     if not base_txt or not head_txt:
-        return {}
+    # Signal to caller that refs/lockfile weren't available
+        return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
 
     base_lock = _load_lock_json(base_txt)
     head_lock = _load_lock_json(head_txt)

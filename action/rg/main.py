@@ -6,6 +6,7 @@ from pathlib import Path
 
 from rg.github_context import load_context
 from rg.models import RDIReport
+
 from rg.rdi.introduced_node import introduced_packages_from_pr
 from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 
@@ -19,6 +20,7 @@ from rg.scanners.grype import run_grype_from_sbom
 from rg.normalize.grype_norm import normalize_grype
 
 from rg.report.pr_comment import render_pr_comment_md
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -49,10 +51,24 @@ def main() -> int:
     grype_findings = normalize_grype(str(grype_path))
 
     # --- Unified summary ---
-    unified = unified_summary(trivy_findings + grype_findings)
     all_findings = trivy_findings + grype_findings
+    unified = unified_summary(all_findings)
 
-    changed_pkgs = introduced_packages_from_pr(ctx.base_sha, ctx.head_sha)
+    # --- Introduced vs pre-existing (Node-first) ---
+    base_sha = ctx.base_sha or ""
+    head_sha = ctx.head_sha or ""
+
+    changed_pkgs = {}
+    diff_unavailable = False
+    if base_sha and head_sha:
+        changed_pkgs = introduced_packages_from_pr(base_sha, head_sha)
+        # Optional sentinel support if you implemented it (won't break if not present)
+        if "__RG_DIFF_UNAVAILABLE__" in changed_pkgs:
+            diff_unavailable = True
+            changed_pkgs.pop("__RG_DIFF_UNAVAILABLE__", None)
+    else:
+        diff_unavailable = True
+
     classified = classify_clusters(all_findings, changed_pkgs)
 
     verdict, score, gate_notes = gate_verdict(
@@ -68,6 +84,10 @@ def main() -> int:
         f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
         *gate_notes,
     ]
+    if diff_unavailable:
+        notes.append(
+            "Lockfile diff unavailable for base/head. If introduced detection looks wrong, set checkout ref to github.event.pull_request.head.sha or allow git fetch of SHAs."
+        )
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
 
@@ -85,7 +105,7 @@ def main() -> int:
             "introduced_clusters": len(classified["introduced"]),
             "preexisting_clusters": len(classified["preexisting"]),
             "changed_pkgs_count": len(changed_pkgs),
-
+            "lockfile_diff_unavailable": diff_unavailable,
         },
         notes=notes,
         top_findings=unified.get("unified_top", [])[:10],
