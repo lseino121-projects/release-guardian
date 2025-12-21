@@ -11,10 +11,7 @@ def _md(s: str | None) -> str:
     return (s or "").replace("|", "\\|")
 
 def _sev_badge(sev: str | None) -> str:
-    """
-    Small visual indicator for severity in GitHub Markdown tables.
-    """
-    s = (sev or "").strip().lower()
+    s = (sev or "").lower()
     if s == "critical":
         return "🟥"
     if s == "high":
@@ -22,17 +19,8 @@ def _sev_badge(sev: str | None) -> str:
     if s == "medium":
         return "🟨"
     if s == "low":
-        return "🟩"
+        return "🟦"
     return "⬜️"
-
-
-def _sev_cell(sev: str | None) -> str:
-    """
-    Render a badge + uppercase severity label.
-    Example: '🟥 CRITICAL'
-    """
-    s = (sev or "unknown").strip()
-    return f"{_sev_badge(s)} {s.upper()}"
 
 
 def _unified_table(unified: dict, limit: int = 5) -> str:
@@ -45,9 +33,12 @@ def _unified_table(unified: dict, limit: int = 5) -> str:
         "|---|---|---|---|---|",
     ]
     for r in rows[:limit]:
-        worst = _sev_cell(r.get("worst_severity"))
+        worst = (r.get("worst_severity") or "").lower()
+        badge = _sev_badge(worst)
+        worst_cell = f"{badge} {_md(worst.upper())}".strip()
+
         lines.append(
-            f"| {worst} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
+            f"| {worst_cell} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
             f"{_md(', '.join(r.get('advisories') or []))} | {_md(', '.join(r.get('tools') or []))} |"
         )
     return "\n".join(lines)
@@ -65,10 +56,11 @@ def _semgrep_table(findings: List[Finding], limit: int = 5) -> str:
         "|---|---|---|---|",
     ]
     for f in findings_sorted:
-        sev = _sev_cell(f.severity)
-        # Semgrep: package=path, installed_version=line (your chosen mapping)
+        sev = (f.severity or "").lower()
+        sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
+
         lines.append(
-            f"| {sev} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |"
+            f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |"
         )
     return "\n".join(lines)
 
@@ -85,12 +77,13 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
         "|---|---|---|---|---|",
     ]
     for f in findings_sorted:
-        sev = _sev_cell(f.severity)
+        sev = (f.severity or "").lower()
+        sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
+
         lines.append(
-            f"| {sev} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} |"
+            f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} |"
         )
     return "\n".join(lines)
-
 
 
 def render_pr_comment_md(
