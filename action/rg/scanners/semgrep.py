@@ -9,8 +9,9 @@ def run_semgrep(
     workspace: str,
     out_dir: str,
     timeout: int = 900,
-    config: str = "rg/rules",
+    config: str = "action/rg/rule",
 ) -> Path:
+
     """
     Run Semgrep on the repo and emit JSON output.
     v1: reporting-only (not gating yet).
@@ -23,14 +24,18 @@ def run_semgrep(
         "scan",
         "--config",
         config,
+        "--include",
+        "*.py",
         "--json",
         "--output",
         str(out_path),
         "--quiet",
     ]
 
+
     # semgrep returns non-zero for findings in some modes; `--json --output` typically still works.
     code, stdout, stderr = run_cmd(cmd, timeout=timeout, cwd=workspace)
+    print(f"[RG] semgrep rules loaded from: {config}")
 
     # If semgrep completely failed and output wasn't produced, surface the error
     if not out_path.exists():

@@ -60,7 +60,6 @@ RUN set -eux; \
   chmod +x /usr/local/bin/grype; \
   rm -f /tmp/grype.tgz
 
-RUN syft version && grype version
 RUN python -m pip install --no-cache-dir --upgrade pip \
   && python -m pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" \
   && semgrep --version
