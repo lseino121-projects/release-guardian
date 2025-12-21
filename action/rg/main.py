@@ -54,8 +54,15 @@ def main() -> int:
     grype_findings = normalize_grype(str(grype_path))
 
     # --- Semgrep (SAST) ---
-    semgrep_path = run_semgrep(workspace=workspace, out_dir=out_dir, timeout=900, config="p/security-audit")
+    semgrep_config = "action/rg/rules"  # local deterministic rules inside repo
+    semgrep_path = run_semgrep(
+        workspace=workspace,
+        out_dir=out_dir,
+        timeout=900,
+        config=semgrep_config,
+    )
     semgrep_findings = normalize_semgrep(str(semgrep_path))
+
 
     deps_findings = trivy_findings + grype_findings  # gating scope (v1)
     unified = unified_summary(deps_findings)
@@ -70,7 +77,7 @@ def main() -> int:
         base_ref=base_sha,
         head_ref=head_sha,
         repo_dir=workspace,
-        config="p/security-audit",
+        config=semgrep_config,
         timeout=900,
     )
     introduced_semgrep_findings = semgrep_baseline.introduced
