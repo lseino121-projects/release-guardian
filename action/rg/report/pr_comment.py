@@ -10,18 +10,44 @@ from rg.models import RDIReport
 def _md(s: str | None) -> str:
     return (s or "").replace("|", "\\|")
 
+def _sev_badge(sev: str | None) -> str:
+    """
+    Small visual indicator for severity in GitHub Markdown tables.
+    """
+    s = (sev or "").strip().lower()
+    if s == "critical":
+        return "🟥"
+    if s == "high":
+        return "🟧"
+    if s == "medium":
+        return "🟨"
+    if s == "low":
+        return "🟩"
+    return "⬜️"
+
+
+def _sev_cell(sev: str | None) -> str:
+    """
+    Render a badge + uppercase severity label.
+    Example: '🟥 CRITICAL'
+    """
+    s = (sev or "unknown").strip()
+    return f"{_sev_badge(s)} {s.upper()}"
+
 
 def _unified_table(unified: dict, limit: int = 5) -> str:
     rows = unified.get("unified_top") or []
     if not rows:
         return "_No vulnerabilities._"
+
     lines = [
         "| Worst | Package | Version | Advisories | Tools |",
         "|---|---|---|---|---|",
     ]
     for r in rows[:limit]:
+        worst = _sev_cell(r.get("worst_severity"))
         lines.append(
-            f"| {_md((r.get('worst_severity') or '').upper())} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
+            f"| {worst} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
             f"{_md(', '.join(r.get('advisories') or []))} | {_md(', '.join(r.get('tools') or []))} |"
         )
     return "\n".join(lines)
@@ -32,16 +58,17 @@ def _semgrep_table(findings: List[Finding], limit: int = 5) -> str:
         return "_No findings._"
 
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    findings_sorted = sorted(findings, key=lambda f: order.get(f.severity, 99))[:limit]
+    findings_sorted = sorted(findings, key=lambda f: order.get((f.severity or "").lower(), 99))[:limit]
 
     lines = [
         "| Severity | Rule | File | Line |",
         "|---|---|---|---|",
     ]
     for f in findings_sorted:
+        sev = _sev_cell(f.severity)
         # Semgrep: package=path, installed_version=line (your chosen mapping)
         lines.append(
-            f"| {_md(f.severity).upper()} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |"
+            f"| {sev} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |"
         )
     return "\n".join(lines)
 
@@ -51,17 +78,19 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
         return "_No findings._"
 
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    findings_sorted = sorted(findings, key=lambda f: order.get(f.severity, 99))[:limit]
+    findings_sorted = sorted(findings, key=lambda f: order.get((f.severity or "").lower(), 99))[:limit]
 
     lines = [
         "| Severity | ID | Package | Installed | Fix |",
         "|---|---|---|---|---|",
     ]
     for f in findings_sorted:
+        sev = _sev_cell(f.severity)
         lines.append(
-            f"| {_md(f.severity).upper()} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} |"
+            f"| {sev} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} |"
         )
     return "\n".join(lines)
+
 
 
 def render_pr_comment_md(

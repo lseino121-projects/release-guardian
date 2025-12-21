@@ -24,7 +24,7 @@ from rg.rdi.introduced_semgrep import introduced_semgrep_from_pr
 from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 
 from rg.report.pr_comment import render_pr_comment_md
-
+from rg.rdi.introduced_sbom import introduced_packages_from_sbom_pr
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -93,6 +93,11 @@ def main() -> int:
     )
     introduced_semgrep_findings = semgrep_baseline.introduced
     preexisting_semgrep_findings = semgrep_baseline.preexisting  # not required yet, but useful later
+
+    sbom_baseline = introduced_packages_from_sbom_pr(base_sha, head_sha, repo_dir=workspace)
+    changed_pkgs = sbom_baseline.changed
+    node_baseline_status = sbom_baseline.status  # reuse existing field name for now if you want
+    diff_unavailable = sbom_baseline.status != "OK"
 
     # -------------------------
     # 4) Gating (introduced-only, deps + semgrep)
