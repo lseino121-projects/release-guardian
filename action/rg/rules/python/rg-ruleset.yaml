@@ -1,0 +1,6 @@
+rules:
+  - id: rg.placeholder
+    message: "placeholder"
+    languages: [python]
+    severity: INFO
+    pattern: "pass"

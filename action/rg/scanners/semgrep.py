@@ -32,13 +32,16 @@ def run_semgrep(
         "scan",
         "--config",
         config,
-        "--include",
-        "*.py",
+        "--error",
+        "--metrics",
+        "off",
         "--json",
         "--output",
         str(out_path),
         "--quiet",
     ]
+
+
 
     code, stdout, stderr = run_cmd(cmd, timeout=timeout, cwd=workspace)
 
