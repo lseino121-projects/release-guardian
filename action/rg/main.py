@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 
 from rg.github_context import load_context
@@ -40,18 +39,6 @@ def main() -> int:
     workspace = "/github/workspace"
     out_dir = f"{workspace}/.rg/out"
 
-    def _sh(cmd: list[str]) -> str:
-        try:
-            return subprocess.check_output(
-                cmd, cwd=workspace, text=True, stderr=subprocess.STDOUT
-            ).strip()
-        except subprocess.CalledProcessError as e:
-            return f"ERROR({e.returncode}): {e.output.strip()}"
-        except Exception as e:
-            return f"EXCEPTION: {e}"
-
-    debug_notes: list[str] = []
-
     # --- Trivy ---
     trivy_path = run_trivy_fs(workspace=workspace, out_dir=out_dir, timeout=600)
     trivy_findings = normalize_trivy(str(trivy_path))
@@ -66,36 +53,13 @@ def main() -> int:
     all_findings = trivy_findings + grype_findings
     unified = unified_summary(all_findings)
 
+    # --- Introduced vs pre-existing (Node-first) ---
     base_sha = ctx.base_sha or ""
     head_sha = ctx.head_sha or ""
 
-    # --- Debug (temporary) ---
-    debug_notes.append(f"DEBUG git rev-parse HEAD: {_sh(['git','rev-parse','HEAD'])}")
-    debug_notes.append(f"DEBUG base_sha: {base_sha} head_sha: {head_sha}")
-    debug_notes.append(
-        f"DEBUG has package-lock in workspace: {_sh(['bash','-lc','test -f package-lock.json && echo yes || echo no'])}"
-    )
-    if base_sha:
-        debug_notes.append(
-            f"DEBUG git show base:pkg-lock: {_sh(['bash','-lc', f'git show {base_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}"
-        )
-    if head_sha:
-        debug_notes.append(
-            f"DEBUG git show head:pkg-lock: {_sh(['bash','-lc', f'git show {head_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}"
-        )
-    debug_notes.append(f"DEBUG remotes: {_sh(['git','remote','-v'])}")
-
-    # --- Introduced vs pre-existing ---
-    changed_pkgs: dict = {}
-    diff_unavailable = False
-
-    if base_sha and head_sha:
-        changed_pkgs = introduced_packages_from_pr(base_sha, head_sha, repo_dir=workspace)
-        if "__RG_DIFF_UNAVAILABLE__" in changed_pkgs:
-            diff_unavailable = True
-            changed_pkgs.pop("__RG_DIFF_UNAVAILABLE__", None)
-    else:
-        diff_unavailable = True
+    baseline = introduced_packages_from_pr(base_sha, head_sha, repo_dir=workspace)
+    changed_pkgs = baseline.changed
+    node_baseline_status = baseline.status
 
     classified = classify_clusters(all_findings, changed_pkgs)
 
@@ -107,17 +71,20 @@ def main() -> int:
         introduced_clusters=classified["introduced"],
     )
 
+    # baseline not OK means we couldn't do a normal base-vs-head diff
+    diff_unavailable = node_baseline_status != "OK"
+
     notes = [
-        *debug_notes,
+        f"Node baseline status: {node_baseline_status}",
         f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
         f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
         *gate_notes,
     ]
 
-
     if diff_unavailable:
         notes.append(
-            "Lockfile diff unavailable for base/head (see DEBUG lines)."
+            "Baseline not OK for Node lockfile. If status=BASE_MISSING, all head deps are treated as introduced (expected). "
+            "If status=REF_UNAVAILABLE, fix git checkout/fetch."
         )
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
@@ -136,9 +103,10 @@ def main() -> int:
             "introduced_clusters": len(classified["introduced"]),
             "preexisting_clusters": len(classified["preexisting"]),
             "changed_pkgs_count": len(changed_pkgs),
+            "node_baseline_status": node_baseline_status,
             "lockfile_diff_unavailable": diff_unavailable,
         },
-        notes=notes[:25],  # keep the PR comment tight; bump temporarily if needed
+        notes=notes[:15],  # tighten once stable
         top_findings=unified.get("unified_top", [])[:10],
     )
 
