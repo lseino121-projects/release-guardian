@@ -108,11 +108,12 @@ def main() -> int:
     )
 
     notes = [
+        *debug_notes,
         f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
         f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
         *gate_notes,
-        *debug_notes,  # keep for one run to diagnose
     ]
+
 
     if diff_unavailable:
         notes.append(
@@ -137,7 +138,7 @@ def main() -> int:
             "changed_pkgs_count": len(changed_pkgs),
             "lockfile_diff_unavailable": diff_unavailable,
         },
-        notes=notes[:10],  # keep the PR comment tight; bump temporarily if needed
+        notes=notes[:25],  # keep the PR comment tight; bump temporarily if needed
         top_findings=unified.get("unified_top", [])[:10],
     )
 
