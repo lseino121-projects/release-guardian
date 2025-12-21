@@ -2,7 +2,23 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Dict, Tuple, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
+
+BaselineStatus = str
+# Allowed statuses (stringly-typed for v1 simplicity)
+OK: BaselineStatus = "OK"
+BASE_MISSING: BaselineStatus = "BASE_MISSING"
+HEAD_MISSING: BaselineStatus = "HEAD_MISSING"
+REF_UNAVAILABLE: BaselineStatus = "REF_UNAVAILABLE"
+PARSE_ERROR: BaselineStatus = "PARSE_ERROR"
+
+
+@dataclass(frozen=True)
+class BaselineResult:
+    status: BaselineStatus
+    changed: Dict[str, Tuple[Optional[str], Optional[str]]]  # pkg -> (base_ver, head_ver)
 
 
 def _has_commit(repo_dir: str, ref: str) -> bool:
@@ -20,8 +36,7 @@ def _has_commit(repo_dir: str, ref: str) -> bool:
 
 def _fetch_commit(repo_dir: str, ref: str) -> bool:
     """
-    Try to fetch the commit object by SHA from origin.
-    Works even when checkout is PR merge ref and base/head SHAs aren't present locally.
+    Fetch commit object by SHA from origin into a temporary ref, so `git show <sha>:path` works.
     """
     tmp_ref = f"refs/rg/{ref}"
     try:
@@ -38,7 +53,7 @@ def _fetch_commit(repo_dir: str, ref: str) -> bool:
 
 def _git_show(repo_dir: str, ref: str, path: str) -> Optional[str]:
     """
-    Return file contents at git ref, or None if file doesn't exist / ref unavailable.
+    Return file contents at git ref, or None if file doesn't exist or ref can't be loaded.
     """
     if not _has_commit(repo_dir, ref):
         if not _fetch_commit(repo_dir, ref):
@@ -103,43 +118,50 @@ def introduced_packages_from_pr(
     head_ref: str,
     lock_path: str = "package-lock.json",
     repo_dir: str = "/github/workspace",
-) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+) -> BaselineResult:
     """
-    Return mapping: pkg -> (base_version, head_version)
-    Only includes packages where version differs or is new/removed.
+    Computes dependency changes for Node by diffing lockfiles.
 
-    If base/head cannot be read, returns:
-      {"__RG_DIFF_UNAVAILABLE__": (None, None)}
+    General baseline rules (future-proof):
+      - OK: base & head exist -> diff
+      - BASE_MISSING: head exists, base missing -> treat all head pkgs as introduced
+      - HEAD_MISSING: base exists, head missing -> treat all pkgs as removed (not introduced) -> changed empty is fine for v1
+      - REF_UNAVAILABLE: cannot load refs/files (git/permissions/etc.)
+      - PARSE_ERROR: invalid lockfile JSON
+
+    Returns BaselineResult(status, changed).
     """
     if not base_ref or not head_ref:
-        return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
+        return BaselineResult(status=REF_UNAVAILABLE, changed={})
 
     base_txt = _git_show(repo_dir, base_ref, lock_path)
     head_txt = _git_show(repo_dir, head_ref, lock_path)
 
-    if not head_txt:
-        return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
+    # If we can't read head, we can't determine what's introduced.
+    if head_txt is None:
+        # If base exists but head doesn't, treat as HEAD_MISSING (rare)
+        if base_txt is not None:
+            return BaselineResult(status=HEAD_MISSING, changed={})
+        return BaselineResult(status=REF_UNAVAILABLE, changed={})
 
-    # If lockfile is introduced in this PR (missing on base, present on head),
-    # treat all head packages as introduced.
-    if not base_txt and head_txt:
+    try:
         head_lock = _load_lock_json(head_txt)
         head_pkgs = _extract_packages(head_lock)
-        return {name: (None, ver) for name, ver in head_pkgs.items()}
+    except Exception:
+        return BaselineResult(status=PARSE_ERROR, changed={})
 
-    # Otherwise require both sides for a diff
-    if not base_txt or not head_txt:
-        return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
+    # If base lockfile is missing but head exists: treat everything in head as introduced.
+    if base_txt is None:
+        changed = {name: (None, ver) for name, ver in head_pkgs.items()}
+        return BaselineResult(status=BASE_MISSING, changed=changed)
 
-
-    base_lock = _load_lock_json(base_txt)
-    head_lock = _load_lock_json(head_txt)
-
-    base_pkgs = _extract_packages(base_lock)
-    head_pkgs = _extract_packages(head_lock)
+    try:
+        base_lock = _load_lock_json(base_txt)
+        base_pkgs = _extract_packages(base_lock)
+    except Exception:
+        return BaselineResult(status=PARSE_ERROR, changed={})
 
     changed: dict[str, tuple[Optional[str], Optional[str]]] = {}
-
     names = set(base_pkgs.keys()) | set(head_pkgs.keys())
     for n in names:
         bv = base_pkgs.get(n)
@@ -147,4 +169,4 @@ def introduced_packages_from_pr(
         if bv != hv:
             changed[n] = (bv, hv)
 
-    return changed
+    return BaselineResult(status=OK, changed=changed)
