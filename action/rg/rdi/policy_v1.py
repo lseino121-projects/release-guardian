@@ -65,7 +65,6 @@ def _worst_of(a: Optional[str], b: Optional[str]) -> Optional[str]:
         return a
     return a if _rank(a) < _rank(b) else b
 
-
 def _rdi_score_from_introduced(
     worst: Optional[str],
     dep_clusters: int,
@@ -75,47 +74,68 @@ def _rdi_score_from_introduced(
     """
     RDI score: 0..100 (higher = safer)
 
-    v1 mapping (simple + explainable):
-      - Start at 95
-      - Apply severity penalty based on worst introduced severity
-      - If both deps + code introduced exist, apply small extra penalty
-      - Small volume penalty (more introduced items -> slightly lower)
+    v1 mapping (simple + explainable, less double-punishing):
+      - Start at 100
+      - Severity penalty dominates (worst introduced)
+      - Small penalty if both deps + code are introduced
+      - Small capped volume penalty
     """
-    score = 95
+    score = 100
+    w = (worst or "").lower().strip() or None
 
     sev_penalty = {
         None: 0,
-        "low": 10,
-        "medium": 25,
-        "high": 45,
-        "critical": 70,
-    }.get((worst or "").lower(), 15)
+        "low": 8,
+        "medium": 22,
+        "high": 40,
+        "critical": 65,
+    }.get(w, 12)
 
     score -= sev_penalty
 
-    # both sources introduced → extra risk surface
+    # broader risk surface if both dependency + code issues introduced
     if dep_advisories > 0 and code_findings > 0:
-        score -= 10
+        score -= 6
 
-    # light volume penalty (keeps score stable but nudges down as volume increases)
-    score -= min(dep_clusters, 5) * 2          # up to -10
-    score -= min(code_findings, 5) * 2         # up to -10
+    # Volume penalty (capped): clusters matter more than advisories (since advisories can explode per package)
+    score -= min(dep_clusters, 5) * 2      # up to -10
+    score -= min(code_findings, 5) * 2     # up to -10
+
+    # If severity already very bad, don't double-punish too hard
+    if w in ("high", "critical"):
+        # cap minimum score based on worst
+        floor = 10 if w == "critical" else 20
+        score = max(score, floor)
 
     # clamp
-    if score < 0:
-        score = 0
-    if score > 100:
-        score = 100
-    return score
+    return max(0, min(100, score))
 
 def _baseline_penalty(status: str) -> int:
-    s = (status or "").upper()
+    """
+    Penalty applied to RDI score based on baseline health.
+
+    Philosophy:
+      - OK: baseline diff reliable
+      - BASE_MISSING: not a failure (lockfile introduced), diff is still deterministic
+      - REF_UNAVAILABLE / SCAN_FAILED: baseline comparison not trustworthy
+    """
+    s = (status or "").upper().strip()
+
     if s == "OK":
         return 0
+
+    # Lockfile introduced in this PR. This is expected and still deterministic:
+    # we treat all head deps as introduced.
     if s == "BASE_MISSING":
-        return 3
-    # REF_UNAVAILABLE / SCAN_FAILED / unknown => bigger penalty
-    return 15
+        return 0
+
+    # Actual baseline confidence problems:
+    if s in ("REF_UNAVAILABLE", "SCAN_FAILED"):
+        return 15
+
+    # Unknown -> treat as medium confidence problem (not as bad as a hard failure)
+    return 8
+
 
 def gate_verdict(
     mode: str,
@@ -158,7 +178,7 @@ def gate_verdict(
     introduced_overall_worst = _worst_of(dep_worst, semgrep_worst)
 
     dep_clusters_ct = len(introduced_clusters)
-    dep_advisories_ct = len(introduced_dep_findings)
+    dep_advisories_ct = len({f.id for f in introduced_dep_findings})
     code_ct = len(introduced_semgrep_findings)
 
     introduced_sources: list[str] = []
