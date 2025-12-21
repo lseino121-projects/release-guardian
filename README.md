@@ -171,8 +171,6 @@ Release Guardian is intentionally opinionated in v1.
 
 ---
 
-
-```markdown
 ## What Release Guardian is not
 
 - ❌ A vulnerability scanner  
