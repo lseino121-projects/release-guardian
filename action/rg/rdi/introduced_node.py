@@ -5,37 +5,53 @@ import subprocess
 from typing import Dict, Tuple, Optional
 
 
-def _git_show(ref: str, path: str) -> Optional[str]:
-    """
-    Return file contents at git ref, or None if file doesn't exist.
-    If the ref isn't present locally (common in PR merge checkouts),
-    attempt to fetch it from origin and retry.
-    """
-    def try_show() -> Optional[str]:
-        try:
-            return subprocess.check_output(
-                ["git", "show", f"{ref}:{path}"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-        except subprocess.CalledProcessError:
-            return None
-
-    out = try_show()
-    if out is not None:
-        return out
-
-    # Try fetching the object by SHA
+def _has_commit(ref: str) -> bool:
     try:
         subprocess.check_call(
-            ["git", "fetch", "--no-tags", "--prune", "origin", ref],
+            ["git", "cat-file", "-e", f"{ref}^{{commit}}"],
             stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def _fetch_commit(ref: str) -> bool:
+    """
+    Try to fetch the commit object by SHA from origin.
+    This works even when checkout is a PR merge ref and base/head SHAs aren't present locally.
+    """
+    # Refspec: fetch <sha> into a temporary local ref
+    tmp_ref = f"refs/rg/{ref}"
+    try:
+        subprocess.check_call(
+            ["git", "fetch", "--no-tags", "--prune", "origin", f"+{ref}:{tmp_ref}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def _git_show(ref: str, path: str) -> Optional[str]:
+    """
+    Return file contents at git ref, or None if file doesn't exist / ref unavailable.
+    """
+    # Ensure commit exists locally
+    if not _has_commit(ref):
+        if not _fetch_commit(ref):
+            return None
+
+    try:
+        return subprocess.check_output(
+            ["git", "show", f"{ref}:{path}"],
+            text=True,
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
         return None
-
-    return try_show()
 
 
 def _load_lock_json(text: str) -> dict:
@@ -51,7 +67,6 @@ def _extract_packages(lock: dict) -> Dict[str, str]:
 
     packages = lock.get("packages")
     if isinstance(packages, dict):
-        # keys look like "" (root) or "node_modules/foo"
         for k, meta in packages.items():
             if k == "" or not isinstance(meta, dict):
                 continue
@@ -63,9 +78,9 @@ def _extract_packages(lock: dict) -> Dict[str, str]:
                 pkgs[name] = ver
         return pkgs
 
-    # Fallback for older lockfile "dependencies"
     deps = lock.get("dependencies")
     if isinstance(deps, dict):
+
         def walk(d: dict):
             for name, meta in d.items():
                 if not isinstance(meta, dict):
@@ -76,20 +91,29 @@ def _extract_packages(lock: dict) -> Dict[str, str]:
                 sub = meta.get("dependencies")
                 if isinstance(sub, dict):
                     walk(sub)
+
         walk(deps)
+
     return pkgs
 
 
-def introduced_packages_from_pr(base_ref: str, head_ref: str, lock_path: str = "package-lock.json") -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+def introduced_packages_from_pr(
+    base_ref: str, head_ref: str, lock_path: str = "package-lock.json"
+) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     """
     Return mapping: pkg -> (base_version, head_version)
     Only includes packages where version differs or is new/removed.
+
+    If base/head cannot be read, returns a sentinel:
+      {"__RG_DIFF_UNAVAILABLE__": (None, None)}
     """
+    if not base_ref or not head_ref:
+        return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
+
     base_txt = _git_show(base_ref, lock_path)
     head_txt = _git_show(head_ref, lock_path)
 
     if not base_txt or not head_txt:
-    # Signal to caller that refs/lockfile weren't available
         return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
 
     base_lock = _load_lock_json(base_txt)
@@ -106,4 +130,5 @@ def introduced_packages_from_pr(base_ref: str, head_ref: str, lock_path: str = "
         hv = head_pkgs.get(n)
         if bv != hv:
             changed[n] = (bv, hv)
+
     return changed
