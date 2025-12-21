@@ -25,6 +25,23 @@ def _unified_table(unified: dict, limit: int = 5) -> str:
         )
     return "\n".join(lines)
 
+def _semgrep_table(findings: List[Finding], limit: int = 5) -> str:
+    if not findings:
+        return "_No findings._"
+
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    findings_sorted = sorted(findings, key=lambda f: order.get(f.severity, 99))[:limit]
+
+    lines = [
+        "| Severity | Rule | File | Line |",
+        "|---|---|---|---|",
+    ]
+    for f in findings_sorted:
+        # package=path, installed_version=line
+        lines.append(
+            f"| {_md(f.severity).upper()} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |"
+        )
+    return "\n".join(lines)
 
 def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
     if not findings:
@@ -44,7 +61,12 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
     return "\n".join(lines)
 
 
-def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype_findings: List[Finding]) -> str:
+def render_pr_comment_md(
+    report: RDIReport,
+    trivy_findings: List[Finding],
+    grype_findings: List[Finding],
+    semgrep_findings: List[Finding],
+) -> str:
     marker = "<!-- release-guardian:rdi -->"
     unified = unified_summary(trivy_findings + grype_findings)
     introduced_ct = int(report.context.get("introduced_clusters", 0) or 0)
@@ -66,6 +88,8 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype
 
     trivy_table = _top_findings_table(trivy_findings)
     grype_table = _top_findings_table(grype_findings)
+    semgrep_table = _semgrep_table(semgrep_findings)
+
 
     unified_table = _unified_table(unified)
 
@@ -83,6 +107,9 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype
 ### Top findings (Grype)
 {grype_table}
 
+### Top findings (Semgrep)
+{semgrep_table}
+
 ### Unified vulnerabilities
 - **Clusters (pkg@version):** {unified["clusters_count"]}
 - **Total advisories (all tools):** {unified["advisories_count"]}
@@ -95,7 +122,7 @@ def render_pr_comment_md(report: RDIReport, trivy_findings: List[Finding], grype
 - Trivy: ✅ ({len(trivy_findings)} findings)
 - Syft: ✅ (SBOM generated)
 - Grype: ✅ ({len(grype_findings)} findings)
-- Semgrep: _pending_
+- Semgrep: ✅ ({len(semgrep_findings)} findings)
 
 ---
 _Release Guardian (RDI) — decision intelligence at PR time._

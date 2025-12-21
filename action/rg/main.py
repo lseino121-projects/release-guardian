@@ -8,6 +8,8 @@ from rg.github_context import load_context
 from rg.models import RDIReport
 
 from rg.normalize.dedupe import unified_summary
+from rg.scanners.semgrep import run_semgrep
+from rg.normalize.semgrep_norm import normalize_semgrep
 
 from rg.rdi.introduced_node import introduced_packages_from_pr
 from rg.rdi.policy_v1 import classify_clusters, gate_verdict
@@ -50,8 +52,13 @@ def main() -> int:
     grype_path = run_grype_from_sbom(str(sbom_path), out_dir=out_dir, timeout=600)
     grype_findings = normalize_grype(str(grype_path))
 
-    all_findings = trivy_findings + grype_findings
-    unified = unified_summary(all_findings)
+    # --- Semgrep (SAST) ---
+    semgrep_path = run_semgrep(workspace=workspace, out_dir=out_dir, timeout=900, config="p/security-audit")
+    semgrep_findings = normalize_semgrep(str(semgrep_path))
+
+    deps_findings = trivy_findings + grype_findings  # gating scope (v1)
+    unified = unified_summary(deps_findings)
+    all_findings = deps_findings
 
     # --- Introduced vs pre-existing (Node-first) ---
     base_sha = ctx.base_sha or ""
@@ -78,6 +85,7 @@ def main() -> int:
         f"Node baseline status: {node_baseline_status}",
         f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
         f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
+        f"Semgrep findings: {len(semgrep_findings)} (reporting only; not gating yet).",
         *gate_notes,
     ]
 
@@ -111,7 +119,7 @@ def main() -> int:
     )
 
     Path(args.out_json).write_text(json.dumps(report.to_dict(), indent=2))
-    Path(args.out_md).write_text(render_pr_comment_md(report, trivy_findings, grype_findings))
+    Path(args.out_md).write_text(render_pr_comment_md(report, trivy_findings, grype_findings, semgrep_findings))
     return 0
 
 

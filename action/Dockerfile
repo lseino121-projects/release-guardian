@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG TRIVY_VERSION=0.57.1
 ARG SYFT_VERSION=1.6.0
 ARG GRYPE_VERSION=0.79.2
+ARG SEMGREP_VERSION=1.74.0
 
 RUN set -eux; \
   arch="$(dpkg --print-architecture)"; \
@@ -60,6 +61,9 @@ RUN set -eux; \
   rm -f /tmp/grype.tgz
 
 RUN syft version && grype version
+RUN pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" \
+  && semgrep --version
+
 
 WORKDIR /app
 
