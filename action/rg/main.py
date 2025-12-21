@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 from rg.github_context import load_context
 from rg.models import RDIReport
 
+from rg.normalize.dedupe import unified_summary
+
 from rg.rdi.introduced_node import introduced_packages_from_pr
 from rg.rdi.policy_v1 import classify_clusters, gate_verdict
-
-from rg.normalize.dedupe import unified_summary
 
 from rg.scanners.trivy import run_trivy_fs
 from rg.normalize.trivy_norm import normalize_trivy
@@ -20,20 +21,6 @@ from rg.scanners.grype import run_grype_from_sbom
 from rg.normalize.grype_norm import normalize_grype
 
 from rg.report.pr_comment import render_pr_comment_md
-import subprocess
-
-def _sh(cmd: list[str]) -> str:
-    try:
-        return subprocess.check_output(cmd, cwd=workspace, text=True, stderr=subprocess.STDOUT).strip()
-    except subprocess.CalledProcessError as e:
-        return f"ERROR({e.returncode}): {e.output.strip()}"
-
-notes.append(f"DEBUG git rev-parse HEAD: {_sh(['git','rev-parse','HEAD'])}")
-notes.append(f"DEBUG base_sha: {ctx.base_sha} head_sha: {ctx.head_sha}")
-notes.append(f"DEBUG has package-lock in workspace: {_sh(['bash','-lc','test -f package-lock.json && echo yes || echo no'])}")
-notes.append(f"DEBUG git show base:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.base_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
-notes.append(f"DEBUG git show head:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.head_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
-notes.append(f"DEBUG remotes: {_sh(['git','remote','-v'])}")
 
 
 def main() -> int:
@@ -53,6 +40,18 @@ def main() -> int:
     workspace = "/github/workspace"
     out_dir = f"{workspace}/.rg/out"
 
+    def _sh(cmd: list[str]) -> str:
+        try:
+            return subprocess.check_output(
+                cmd, cwd=workspace, text=True, stderr=subprocess.STDOUT
+            ).strip()
+        except subprocess.CalledProcessError as e:
+            return f"ERROR({e.returncode}): {e.output.strip()}"
+        except Exception as e:
+            return f"EXCEPTION: {e}"
+
+    debug_notes: list[str] = []
+
     # --- Trivy ---
     trivy_path = run_trivy_fs(workspace=workspace, out_dir=out_dir, timeout=600)
     trivy_findings = normalize_trivy(str(trivy_path))
@@ -64,33 +63,34 @@ def main() -> int:
     grype_path = run_grype_from_sbom(str(sbom_path), out_dir=out_dir, timeout=600)
     grype_findings = normalize_grype(str(grype_path))
 
-    # --- Unified summary ---
     all_findings = trivy_findings + grype_findings
     unified = unified_summary(all_findings)
 
-    # --- Introduced vs pre-existing (Node-first) ---
     base_sha = ctx.base_sha or ""
     head_sha = ctx.head_sha or ""
 
-    changed_pkgs = {}
+    # --- Debug (temporary) ---
+    debug_notes.append(f"DEBUG git rev-parse HEAD: {_sh(['git','rev-parse','HEAD'])}")
+    debug_notes.append(f"DEBUG base_sha: {base_sha} head_sha: {head_sha}")
+    debug_notes.append(
+        f"DEBUG has package-lock in workspace: {_sh(['bash','-lc','test -f package-lock.json && echo yes || echo no'])}"
+    )
+    if base_sha:
+        debug_notes.append(
+            f"DEBUG git show base:pkg-lock: {_sh(['bash','-lc', f'git show {base_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}"
+        )
+    if head_sha:
+        debug_notes.append(
+            f"DEBUG git show head:pkg-lock: {_sh(['bash','-lc', f'git show {head_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}"
+        )
+    debug_notes.append(f"DEBUG remotes: {_sh(['git','remote','-v'])}")
+
+    # --- Introduced vs pre-existing ---
+    changed_pkgs: dict = {}
     diff_unavailable = False
 
     if base_sha and head_sha:
-
-        def _sh(cmd: list[str]) -> str:
-            try:
-                return subprocess.check_output(cmd, cwd=workspace, text=True, stderr=subprocess.STDOUT).strip()
-            except subprocess.CalledProcessError as e:
-                return f"ERROR({e.returncode}): {e.output.strip()}"
-
-        notes.append(f"DEBUG git rev-parse HEAD: {_sh(['git','rev-parse','HEAD'])}")
-        notes.append(f"DEBUG base_sha: {ctx.base_sha} head_sha: {ctx.head_sha}")
-        notes.append(f"DEBUG has package-lock in workspace: {_sh(['bash','-lc','test -f package-lock.json && echo yes || echo no'])}")
-        notes.append(f"DEBUG git show base:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.base_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
-        notes.append(f"DEBUG git show head:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.head_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
-        notes.append(f"DEBUG remotes: {_sh(['git','remote','-v'])}")
-        changed_pkgs = introduced_packages_from_pr(ctx.base_sha, ctx.head_sha, repo_dir=workspace)
-        # Optional sentinel support if you implemented it (won't break if not present)
+        changed_pkgs = introduced_packages_from_pr(base_sha, head_sha, repo_dir=workspace)
         if "__RG_DIFF_UNAVAILABLE__" in changed_pkgs:
             diff_unavailable = True
             changed_pkgs.pop("__RG_DIFF_UNAVAILABLE__", None)
@@ -111,10 +111,12 @@ def main() -> int:
         f"Unified clusters (pkg@ver): {unified['clusters_count']} across {unified['advisories_count']} advisories.",
         f"Introduced clusters: {len(classified['introduced'])} | Pre-existing clusters: {len(classified['preexisting'])}",
         *gate_notes,
+        *debug_notes,  # keep for one run to diagnose
     ]
+
     if diff_unavailable:
         notes.append(
-            "Lockfile diff unavailable for base/head. If introduced detection looks wrong, set checkout ref to github.event.pull_request.head.sha or allow git fetch of SHAs."
+            "Lockfile diff unavailable for base/head (see DEBUG lines)."
         )
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
@@ -135,7 +137,7 @@ def main() -> int:
             "changed_pkgs_count": len(changed_pkgs),
             "lockfile_diff_unavailable": diff_unavailable,
         },
-        notes=notes,
+        notes=notes[:10],  # keep the PR comment tight; bump temporarily if needed
         top_findings=unified.get("unified_top", [])[:10],
     )
 
