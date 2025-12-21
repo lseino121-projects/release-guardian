@@ -61,7 +61,7 @@ def main() -> int:
     changed_pkgs = {}
     diff_unavailable = False
     if base_sha and head_sha:
-        changed_pkgs = introduced_packages_from_pr(base_sha, head_sha)
+        changed_pkgs = introduced_packages_from_pr(ctx.base_sha, ctx.head_sha, repo_dir=workspace)
         # Optional sentinel support if you implemented it (won't break if not present)
         if "__RG_DIFF_UNAVAILABLE__" in changed_pkgs:
             diff_unavailable = True

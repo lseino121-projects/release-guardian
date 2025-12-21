@@ -5,10 +5,11 @@ import subprocess
 from typing import Dict, Tuple, Optional
 
 
-def _has_commit(ref: str) -> bool:
+def _has_commit(repo_dir: str, ref: str) -> bool:
     try:
         subprocess.check_call(
             ["git", "cat-file", "-e", f"{ref}^{{commit}}"],
+            cwd=repo_dir,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -17,16 +18,16 @@ def _has_commit(ref: str) -> bool:
         return False
 
 
-def _fetch_commit(ref: str) -> bool:
+def _fetch_commit(repo_dir: str, ref: str) -> bool:
     """
     Try to fetch the commit object by SHA from origin.
-    This works even when checkout is a PR merge ref and base/head SHAs aren't present locally.
+    Works even when checkout is PR merge ref and base/head SHAs aren't present locally.
     """
-    # Refspec: fetch <sha> into a temporary local ref
     tmp_ref = f"refs/rg/{ref}"
     try:
         subprocess.check_call(
             ["git", "fetch", "--no-tags", "--prune", "origin", f"+{ref}:{tmp_ref}"],
+            cwd=repo_dir,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -35,18 +36,18 @@ def _fetch_commit(ref: str) -> bool:
         return False
 
 
-def _git_show(ref: str, path: str) -> Optional[str]:
+def _git_show(repo_dir: str, ref: str, path: str) -> Optional[str]:
     """
     Return file contents at git ref, or None if file doesn't exist / ref unavailable.
     """
-    # Ensure commit exists locally
-    if not _has_commit(ref):
-        if not _fetch_commit(ref):
+    if not _has_commit(repo_dir, ref):
+        if not _fetch_commit(repo_dir, ref):
             return None
 
     try:
         return subprocess.check_output(
             ["git", "show", f"{ref}:{path}"],
+            cwd=repo_dir,
             text=True,
             stderr=subprocess.DEVNULL,
         )
@@ -98,20 +99,23 @@ def _extract_packages(lock: dict) -> Dict[str, str]:
 
 
 def introduced_packages_from_pr(
-    base_ref: str, head_ref: str, lock_path: str = "package-lock.json"
+    base_ref: str,
+    head_ref: str,
+    lock_path: str = "package-lock.json",
+    repo_dir: str = "/github/workspace",
 ) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     """
     Return mapping: pkg -> (base_version, head_version)
     Only includes packages where version differs or is new/removed.
 
-    If base/head cannot be read, returns a sentinel:
+    If base/head cannot be read, returns:
       {"__RG_DIFF_UNAVAILABLE__": (None, None)}
     """
     if not base_ref or not head_ref:
         return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
 
-    base_txt = _git_show(base_ref, lock_path)
-    head_txt = _git_show(head_ref, lock_path)
+    base_txt = _git_show(repo_dir, base_ref, lock_path)
+    head_txt = _git_show(repo_dir, head_ref, lock_path)
 
     if not base_txt or not head_txt:
         return {"__RG_DIFF_UNAVAILABLE__": (None, None)}
