@@ -142,6 +142,7 @@ def main() -> int:
             "semgrep_baseline_status": semgrep_baseline.status,
             "semgrep_introduced_count": len(introduced_semgrep_findings),
             "semgrep_preexisting_count": len(preexisting_semgrep_findings),
+            "introduced_clusters_list": classified["introduced"],
         },
         notes=notes[:15],  # tighten once stable
         top_findings=unified.get("unified_top", [])[:10],

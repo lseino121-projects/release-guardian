@@ -11,6 +11,13 @@ _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 def _sev_rank(sev: str | None) -> int:
     return _SEV_ORDER.get((sev or "").lower(), 99)
 
+def unified_summary_for_clusters(findings: List[Finding], clusters: list[tuple[str, str]]) -> dict:
+    """
+    Like unified_summary(), but only for the provided (pkg, ver) clusters.
+    """
+    wanted = set((p or "", v or "") for (p, v) in clusters)
+    filtered = [f for f in findings if (f.package or "", f.installed_version or "") in wanted]
+    return unified_summary(filtered)
 
 def cluster_findings(findings: Iterable[Finding]) -> dict[tuple[str, str], list[Finding]]:
     """

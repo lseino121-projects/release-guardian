@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import List
 
 from rg.normalize.schema import Finding
-from rg.normalize.dedupe import unified_summary
+from rg.normalize.dedupe import unified_summary, unified_summary_for_clusters
 from rg.models import RDIReport
 
 
 def _md(s: str | None) -> str:
     return (s or "").replace("|", "\\|")
+
 
 def _unified_table(unified: dict, limit: int = 5) -> str:
     rows = unified.get("unified_top") or []
@@ -25,6 +26,7 @@ def _unified_table(unified: dict, limit: int = 5) -> str:
         )
     return "\n".join(lines)
 
+
 def _semgrep_table(findings: List[Finding], limit: int = 5) -> str:
     if not findings:
         return "_No findings._"
@@ -37,11 +39,12 @@ def _semgrep_table(findings: List[Finding], limit: int = 5) -> str:
         "|---|---|---|---|",
     ]
     for f in findings_sorted:
-        # package=path, installed_version=line
+        # Semgrep: package=path, installed_version=line (your chosen mapping)
         lines.append(
             f"| {_md(f.severity).upper()} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |"
         )
     return "\n".join(lines)
+
 
 def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
     if not findings:
@@ -68,12 +71,27 @@ def render_pr_comment_md(
     semgrep_findings: List[Finding],
     introduced_semgrep_findings: List[Finding],
 ) -> str:
-
     marker = "<!-- release-guardian:rdi -->"
-    unified = unified_summary(trivy_findings + grype_findings)
+
+    deps_findings = trivy_findings + grype_findings
+    unified_all = unified_summary(deps_findings)
+
     introduced_ct = int(report.context.get("introduced_clusters", 0) or 0)
     preexisting_ct = int(report.context.get("preexisting_clusters", 0) or 0)
     changed_pkgs_ct = int(report.context.get("changed_pkgs_count", 0) or 0)
+
+    # Prefer explicit list (best). If missing, we can't filter precisely, so display a hint.
+    introduced_clusters = report.context.get("introduced_clusters_list") or []
+
+    if introduced_clusters:
+        introduced_deps = unified_summary_for_clusters(deps_findings, introduced_clusters)
+        introduced_deps_table = _unified_table(introduced_deps)
+        introduced_deps_note = ""
+    else:
+        introduced_deps_table = "_(Introduced dependency clusters list not provided to renderer yet.)_"
+        introduced_deps_note = "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
+
+    introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings)
 
     verdict = report.verdict
     score = report.rdi_score
@@ -88,12 +106,12 @@ def render_pr_comment_md(
     notes = (report.notes or [])[:6]
     why_lines = "\n".join([f"- {_md(n)}" for n in notes]) if notes else "- (No notes)"
 
+    # “details” sections (keep the comment tight)
     trivy_table = _top_findings_table(trivy_findings)
     grype_table = _top_findings_table(grype_findings)
     semgrep_table = _semgrep_table(semgrep_findings)
-    introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings)
 
-    unified_table = _unified_table(unified)
+    unified_all_table = _unified_table(unified_all)
 
     md = f"""{marker}
 {header}
@@ -103,25 +121,39 @@ def render_pr_comment_md(
 ### Why
 {why_lines}
 
-### Top findings (Trivy)
-{trivy_table}
+### Introduced risk (what this PR adds)
+**Dependencies (introduced clusters):** {introduced_ct}  
+{introduced_deps_note}
+{introduced_deps_table}
 
-### Top findings (Grype)
-{grype_table}
-
-### Top findings (Semgrep)
-{semgrep_table}
-
-### Introduced findings (Semgrep)
+**Code (Semgrep introduced):** {len(introduced_semgrep_findings)}
 {introduced_semgrep_table}
 
-### Unified vulnerabilities
-- **Clusters (pkg@version):** {unified["clusters_count"]}
-- **Total advisories (all tools):** {unified["advisories_count"]}
-- **Worst severity:** {unified["worst_severity"].upper() if unified["worst_severity"] else "UNKNOWN"}
+<details>
+<summary><b>Details: Top findings (Trivy)</b></summary>
+
+{trivy_table}
+</details>
+
+<details>
+<summary><b>Details: Top findings (Grype)</b></summary>
+
+{grype_table}
+</details>
+
+<details>
+<summary><b>Details: Top findings (Semgrep)</b></summary>
+
+{semgrep_table}
+</details>
+
+### Dependency vulnerability snapshot (all tools)
+- **Clusters (pkg@version):** {unified_all["clusters_count"]}
+- **Total advisories (all tools):** {unified_all["advisories_count"]}
+- **Worst severity:** {unified_all["worst_severity"].upper() if unified_all["worst_severity"] else "UNKNOWN"}
 - **Introduced clusters:** {introduced_ct} | **Pre-existing clusters:** {preexisting_ct} | **Changed packages:** {changed_pkgs_ct}
 
-{unified_table}
+{unified_all_table}
 
 ### Scanners
 - Trivy: ✅ ({len(trivy_findings)} findings)

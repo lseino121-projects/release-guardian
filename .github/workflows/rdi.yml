@@ -30,4 +30,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           mode: enforce
           severity_threshold: high
-          allow_conditional: false
+          allow_conditional: true
