@@ -20,6 +20,20 @@ from rg.scanners.grype import run_grype_from_sbom
 from rg.normalize.grype_norm import normalize_grype
 
 from rg.report.pr_comment import render_pr_comment_md
+import subprocess
+
+def _sh(cmd: list[str]) -> str:
+    try:
+        return subprocess.check_output(cmd, cwd=workspace, text=True, stderr=subprocess.STDOUT).strip()
+    except subprocess.CalledProcessError as e:
+        return f"ERROR({e.returncode}): {e.output.strip()}"
+
+notes.append(f"DEBUG git rev-parse HEAD: {_sh(['git','rev-parse','HEAD'])}")
+notes.append(f"DEBUG base_sha: {ctx.base_sha} head_sha: {ctx.head_sha}")
+notes.append(f"DEBUG has package-lock in workspace: {_sh(['bash','-lc','test -f package-lock.json && echo yes || echo no'])}")
+notes.append(f"DEBUG git show base:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.base_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
+notes.append(f"DEBUG git show head:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.head_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
+notes.append(f"DEBUG remotes: {_sh(['git','remote','-v'])}")
 
 
 def main() -> int:
@@ -60,8 +74,24 @@ def main() -> int:
 
     changed_pkgs = {}
     diff_unavailable = False
+    import subprocess
+
+    def _sh(cmd: list[str]) -> str:
+        try:
+            return subprocess.check_output(cmd, cwd=workspace, text=True, stderr=subprocess.STDOUT).strip()
+        except subprocess.CalledProcessError as e:
+            return f"ERROR({e.returncode}): {e.output.strip()}"
+
+    notes.append(f"DEBUG git rev-parse HEAD: {_sh(['git','rev-parse','HEAD'])}")
+    notes.append(f"DEBUG base_sha: {ctx.base_sha} head_sha: {ctx.head_sha}")
+    notes.append(f"DEBUG has package-lock in workspace: {_sh(['bash','-lc','test -f package-lock.json && echo yes || echo no'])}")
+    notes.append(f"DEBUG git show base:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.base_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
+    notes.append(f"DEBUG git show head:pkg-lock: {_sh(['bash','-lc', f'git show {ctx.head_sha}:package-lock.json >/dev/null && echo ok || echo missing'])}")
+    notes.append(f"DEBUG remotes: {_sh(['git','remote','-v'])}")
+
     if base_sha and head_sha:
         changed_pkgs = introduced_packages_from_pr(ctx.base_sha, ctx.head_sha, repo_dir=workspace)
+
         # Optional sentinel support if you implemented it (won't break if not present)
         if "__RG_DIFF_UNAVAILABLE__" in changed_pkgs:
             diff_unavailable = True
