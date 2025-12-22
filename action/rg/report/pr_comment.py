@@ -5,7 +5,7 @@ from typing import List
 from rg.normalize.schema import Finding
 from rg.normalize.dedupe import unified_summary, unified_summary_for_clusters
 from rg.models import RDIReport
-
+from rg.report.decision_block import render_decision_block
 
 def _md(s: str | None) -> str:
     return (s or "").replace("|", "\\|")
@@ -94,6 +94,7 @@ def render_pr_comment_md(
     introduced_semgrep_findings: List[Finding],
 ) -> str:
     marker = "<!-- release-guardian:rdi -->"
+    decision_block = render_decision_block(report)
 
     deps_findings = trivy_findings + grype_findings
     unified_all = unified_summary(deps_findings)
@@ -149,12 +150,9 @@ def render_pr_comment_md(
     unified_all_table = _unified_table(unified_all)
 
     md = f"""{marker}
-{header}
+{decision_block}
 
-**Summary:** {_md(report.summary)}
-
-### Why
-{why_lines}
+---
 
 ### Introduced risk (what this PR adds)
 **Dependencies (introduced clusters):** {introduced_ct}  

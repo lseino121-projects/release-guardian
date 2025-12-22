@@ -26,6 +26,18 @@ from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 from rg.report.pr_comment import render_pr_comment_md
 from rg.rdi.introduced_sbom import introduced_packages_from_sbom_pr
 
+def baseline_confidence(node_status: str, semgrep_status: str) -> str:
+    def pen(s: str) -> int:
+        s = (s or "").upper()
+        if s == "OK":
+            return 0
+        if s == "BASE_MISSING":
+            return 3
+        return 15
+    p = pen(node_status) + pen(semgrep_status)
+    return "HIGH" if p == 0 else ("MED" if p <= 6 else "LOW")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--event-path", required=True)
@@ -199,6 +211,12 @@ def main() -> int:
             "introduced_code_findings_count": len(introduced_semgrep_findings),
             "introduced_worst_severity": introduced_overall_worst,
             "introduced_sources": introduced_sources,  # ["deps", "code"]
+            "severity_threshold": args.severity_threshold,
+            "baseline_confidence": baseline_confidence(
+                node_baseline_status,
+                semgrep_baseline.status,
+            ),
+
         },
         notes=notes[:10],  # keep it crisp; pr_comment uses first ~6 anyway
         top_findings=unified.get("unified_top", [])[:10],
