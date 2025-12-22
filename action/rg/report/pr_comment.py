@@ -185,7 +185,7 @@ def render_pr_comment_md(
 ### Dependency vulnerability snapshot (all tools)
 - **Clusters (pkg@version):** {unified_all["clusters_count"]}
 - **Total advisories (all tools):** {unified_all["advisories_count"]}
-- **Worst severity:** {unified_all["worst_severity"].upper() if unified_all["worst_severity"] else "UNKNOWN"}
+- **Worst severity:** {"NONE" if unified_all["clusters_count"] == 0 else (unified_all["worst_severity"].upper() if unified_all["worst_severity"] else "UNKNOWN")}
 - **Introduced clusters:** {introduced_ct} | **Pre-existing clusters:** {preexisting_ct} | **Changed packages:** {changed_pkgs_ct}
 
 {unified_all_table}

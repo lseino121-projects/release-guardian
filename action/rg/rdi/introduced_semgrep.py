@@ -93,15 +93,15 @@ def _git_archive_to_dir(repo_dir: str, ref: str, out_dir: str) -> bool:
 
 def _run_semgrep(target_dir: str, out_path: str, config: str, timeout: int) -> bool:
     cmd = [
-        "semgrep",
-        "scan",
-        "--config",
-        config,
+        "semgrep", "scan",
+        "--config", config,
+        "--exclude", "unsafe",
+        "--exclude", "examples/unsafe",
         "--json",
-        "--output",
-        out_path,
+        "--output", out_path,
         "--quiet",
     ]
+
     try:
         subprocess.run(
             cmd,

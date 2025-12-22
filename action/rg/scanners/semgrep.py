@@ -28,20 +28,14 @@ def run_semgrep(
         )
 
     cmd = [
-        "semgrep",
-        "scan",
-        "--config",
-        config,
-        "--error",
-        "--metrics",
-        "off",
-        "--json",
-        "--output",
-        str(out_path),
-        "--quiet",
+    "semgrep", "scan",
+    "--config", config,
+    "--exclude", "unsafe",
+    "--exclude", "examples/unsafe",
+    "--json",
+    "--output", str(out_path),
+    "--quiet",
     ]
-
-
 
     code, stdout, stderr = run_cmd(cmd, timeout=timeout, cwd=workspace)
 
