@@ -1,130 +1,99 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Dict, Iterable, List, Mapping, Optional
+
+import yaml
 
 
-# -------------------------
-# Exact-match hints (best)
-# -------------------------
-HINTS: Dict[str, str] = {
-    # --- Semgrep rules ---
-    "action.rg.rules.javascript.rg.js.child-process-exec":
-        "Avoid exec/shell. Use spawn/execFile with args array; never pass user input to a shell.",
-    "action.rg.rules.python.rg.python.subprocess-popen-shell-true":
-        "Avoid shell=True. Use subprocess.run([...], shell=False) and validate inputs.",
-
-    # --- Optional: advisory IDs (CVE/GHSA) ---
-    # "cve-2021-44906": "Upgrade minimist to a fixed version (see Fix column).",
-}
-
-# -------------------------
-# Pattern fallback (stable)
-# -------------------------
-# (needle, hint)
-PATTERN_HINTS: Tuple[Tuple[str, str], ...] = (
-    ("child-process-exec", "Avoid exec/shell. Use spawn/execFile with args array; never pass user input to a shell."),
-    ("subprocess-popen-shell-true", "Avoid shell=True. Use subprocess.run([...], shell=False) and validate inputs."),
-    # Terraform / Docker examples (only keep if you actually have these rules)
-    ("0.0.0.0/0", "Restrict ingress. Avoid 0.0.0.0/0 on sensitive ports."),
-    ("latest-tag", "Pin image tags/digests for reproducible builds and safer rollbacks."),
-)
-
-# -------------------------
-# Advisory prefixes → generic hint
-# -------------------------
-ADVISORY_PREFIXES = ("cve-", "ghsa-")
+def _rule_files(rules_dir: Path) -> Iterable[Path]:
+    if not rules_dir.exists():
+        return []
+    return [
+        p for p in rules_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in {".yml", ".yaml"}
+    ]
 
 
-def _norm(s: str) -> str:
-    return (s or "").strip().lower()
+def _rules_from_data(data: object) -> List[Mapping[str, object]]:
+    if not data:
+        return []
+    if isinstance(data, dict):
+        if "rules" in data and isinstance(data["rules"], list):
+            return [r for r in data["rules"] if isinstance(r, dict)]
+        return [data]
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    return []
 
 
-def _is_advisory_id(fid: str) -> bool:
-    fid = _norm(fid)
-    return fid.startswith(ADVISORY_PREFIXES)
+def _hint_from_rule(rule: Mapping[str, object]) -> str:
+    metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+    rg_meta = metadata.get("rg") if isinstance(metadata.get("rg"), dict) else {}
+    hint = rg_meta.get("hint") if isinstance(rg_meta.get("hint"), str) else ""
+    if not hint:
+        msg = rule.get("message")
+        hint = msg if isinstance(msg, str) else ""
+    return hint
 
 
-def _join_versions(versions: Sequence[str], limit: int = 2) -> str:
-    vs = [v.strip() for v in versions if v and v.strip()]
-    if not vs:
-        return ""
-    head = vs[:limit]
-    more = "" if len(vs) <= limit else f" (+{len(vs) - limit} more)"
-    return f"{', '.join(head)}{more}"
+def _find_repo_root(start: Path) -> Optional[Path]:
+    """
+    Walk upward looking for a directory that contains 'action/rg/rules'.
+    """
+    cur = start.resolve()
+    for _ in range(10):
+        candidate = cur / "action" / "rg" / "rules"
+        if candidate.exists():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return None
 
 
-# -------------------------------------------------------------------
-# Backward-compatible API (what you already call everywhere)
-# -------------------------------------------------------------------
+def _rules_dir() -> Path:
+    # In GitHub Actions / your action container, this is the most reliable.
+    ws = os.environ.get("GITHUB_WORKSPACE")
+    if ws:
+        p = Path(ws) / "action" / "rg" / "rules"
+        if p.exists():
+            return p
+
+    # Local dev: infer repo root from this file’s location.
+    root = _find_repo_root(Path(__file__).parent)
+    if root:
+        return root / "action" / "rg" / "rules"
+
+    # Final fallback (won’t find much, but avoids crashing)
+    return Path("action/rg/rules")
+
+
+@lru_cache(maxsize=1)
+@lru_cache(maxsize=1)
+def _hint_map() -> Dict[str, str]:
+    # repo-local Semgrep rules live here:
+    rules_dir = Path("/github/workspace") / "action" / "rg" / "rules"
+    hints: Dict[str, str] = {}
+    for path in _rule_files(rules_dir):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for rule in _rules_from_data(data):
+            rule_id = rule.get("id")
+            if not isinstance(rule_id, str):
+                continue
+            hint = _hint_from_rule(rule).strip()
+            if hint:
+                hints[rule_id.strip().lower()] = hint
+    return hints
+
+
 def hint_for_id(finding_id: str | None) -> str:
-    """
-    Returns a 1-line remediation hint for:
-      - Semgrep rule IDs
-      - Advisory IDs (CVE/GHSA)
-
-    Backward compatible: callers only pass finding_id.
-    """
-    fid = _norm(finding_id)
+    fid = (finding_id or "").strip().lower()
     if not fid:
         return ""
-
-    # 1) Exact match
-    hit = HINTS.get(fid)
-    if hit:
-        return hit
-
-    # 2) Pattern fallback
-    for needle, hint in PATTERN_HINTS:
-        if needle in fid:
-            return hint
-
-    # 3) Generic advisory fallback
-    if _is_advisory_id(fid):
-        return "Upgrade the affected dependency to a fixed version (see Fix column)."
-
-    return ""
-
-
-# -------------------------------------------------------------------
-# Next-level API (optional): use context when available
-# -------------------------------------------------------------------
-@dataclass(frozen=True)
-class HintContext:
-    finding_id: Optional[str] = None
-    package: Optional[str] = None
-    installed_version: Optional[str] = None
-    fixed_versions: Optional[Sequence[str]] = None
-    tool: Optional[str] = None  # e.g. "trivy", "grype", "semgrep"
-    rule_id: Optional[str] = None  # alias of finding_id for semgrep
-
-
-def hint_for(ctx: HintContext) -> str:
-    """
-    Next-level hinting that uses extra context when you have it.
-
-    Use this if you want richer dependency hints like:
-      "Upgrade minimist to 1.2.8 (+2 more)."
-    """
-    fid = _norm(ctx.rule_id or ctx.finding_id or "")
-    pkg = (ctx.package or "").strip()
-    fixed_versions = list(ctx.fixed_versions or [])
-
-    # 1) Reuse the existing logic first (exact + pattern)
-    base = hint_for_id(fid)
-    if base:
-        return base
-
-    # 2) Dependency-aware generic hint (CVE/GHSA, or when fix versions exist)
-    if fixed_versions or _is_advisory_id(fid):
-        vtxt = _join_versions(fixed_versions, limit=2)
-        if pkg and vtxt:
-            return f"Upgrade {pkg} to {vtxt}."
-        if pkg:
-            return f"Upgrade {pkg} to a fixed version (see Fix column)."
-        if vtxt:
-            return f"Upgrade the dependency to {vtxt}."
-        return "Upgrade the affected dependency to a fixed version (see Fix column)."
-
-    # 3) No hint found
-    return ""
+    return _hint_map().get(fid, "")

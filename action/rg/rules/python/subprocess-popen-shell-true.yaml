@@ -1,12 +1,18 @@
 rules:
-  - id: rg.python.subprocess-popen-shell-true
+  - id: action.rg.rules.python.rg.python.subprocess-popen-shell-true
     languages: [python]
     message: "Dangerous subprocess execution with shell=True. Prefer shell=False and pass args as a list."
     severity: ERROR
     patterns:
-      - pattern: subprocess.Popen(..., shell=True, ...)
+      - pattern-either:
+          - pattern: subprocess.Popen(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: os.system(...)
     metadata:
       category: security
       confidence: HIGH
       likelihood: HIGH
       impact: HIGH
+      rg:
+        hint: "Avoid shell=True. Use subprocess.run([...], shell=False) and validate inputs."
