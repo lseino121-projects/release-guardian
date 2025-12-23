@@ -14,3 +14,4 @@ class Finding:
     installed_version: Optional[str]
     fixed_version: Optional[str]
     title: Optional[str]
+    hint: Optional[str] = None

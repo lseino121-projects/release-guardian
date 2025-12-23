@@ -102,7 +102,9 @@ def main() -> int:
         repo_dir=workspace,
         config=semgrep_config,
         timeout=900,
+        excludes=["unsafe", "examples/unsafe"],  # or just ["examples/unsafe"] if you removed "unsafe"
     )
+
     introduced_semgrep_findings = semgrep_baseline.introduced
     preexisting_semgrep_findings = semgrep_baseline.preexisting  # not required yet, but useful later
 

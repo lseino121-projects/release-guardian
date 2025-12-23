@@ -4,8 +4,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Set
-
+from typing import Iterable, List, Optional, Set
 from rg.normalize.schema import Finding
 from rg.normalize.semgrep_norm import normalize_semgrep
 
@@ -91,26 +90,72 @@ def _git_archive_to_dir(repo_dir: str, ref: str, out_dir: str) -> bool:
         return False
 
 
-def _run_semgrep(target_dir: str, out_path: str, config: str, timeout: int) -> bool:
-    cmd = [
-        "semgrep", "scan",
-        "--config", config,
-        "--exclude", "unsafe",
-        "--exclude", "examples/unsafe",
+DEFAULT_EXCLUDES = [
+    ".git",
+    ".rg",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    "coverage",
+    "examples/unsafe",
+]
+
+
+def _run_semgrep(
+    target_dir: str,
+    out_path: str,
+    config: str,
+    timeout: int,
+    excludes: Optional[Iterable[str]] = None,
+) -> bool:
+    """
+    Run semgrep and write JSON results to out_path.
+
+    Success condition (MVP): out_path exists.
+    Semgrep can return non-zero even when it writes output (findings, parse issues, etc).
+    """
+    exclude_list: List[str] = list(DEFAULT_EXCLUDES)
+    if excludes:
+        for e in excludes:
+            e = str(e).strip()
+            if e and e not in exclude_list:
+                exclude_list.append(e)
+
+    cmd: List[str] = [
+        "semgrep",
+        "scan",
+        "--config",
+        config,
         "--json",
-        "--output", out_path,
+        "--output",
+        out_path,
         "--quiet",
     ]
 
+    for e in exclude_list:
+        cmd.extend(["--exclude", e])
+
     try:
-        subprocess.run(
+        p = subprocess.run(
             cmd,
             cwd=target_dir,
             timeout=timeout,
             text=True,
             capture_output=True,
         )
-        return Path(out_path).exists()
+
+        # Source of truth: did we produce the JSON artifact?
+        if Path(out_path).exists():
+            return True
+
+        # If no output, surface a helpful debug breadcrumb (caller can decide how to expose)
+        # Keep it short to avoid huge logs.
+        err = (p.stderr or "").strip()
+        raise RuntimeError(f"semgrep produced no JSON (exit={p.returncode}). stderr={err[:2000]}")
+
     except Exception:
         return False
 
@@ -120,13 +165,32 @@ def _fp(f: Finding) -> str:
     return f"{f.id}|{f.package or ''}|{f.installed_version or ''}"
 
 
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from typing import Optional, Set, List
+
+from rg.normalize.semgrep_norm import normalize_semgrep
+from rg.rdi.semgrep_types import SemgrepBaselineResult, OK, REF_UNAVAILABLE, SCAN_FAILED  # adjust imports if different
+# assumes _git_safe, _git_archive_to_dir, _run_semgrep, _fp already exist in this module
+
+
 def introduced_semgrep_from_pr(
     base_ref: str,
     head_ref: str,
     repo_dir: str = "/github/workspace",
-    config: str = "p/security-audit",
+    config: str = "action/rg/rules",
     timeout: int = 900,
+    excludes: Optional[List[str]] = None,
 ) -> SemgrepBaselineResult:
+    """
+    Compute introduced vs pre-existing Semgrep findings for a PR by scanning:
+      - base snapshot (git archive)
+      - head working tree
+
+    Success condition for each scan: JSON artifact exists.
+    """
     if not base_ref or not head_ref:
         return SemgrepBaselineResult(REF_UNAVAILABLE, [], [], 0, 0)
 
@@ -143,8 +207,20 @@ def introduced_semgrep_from_pr(
         base_json = str(Path(tmp) / "semgrep_base.json")
         head_json = str(Path(tmp) / "semgrep_head.json")
 
-        ok_base = _run_semgrep(str(base_dir), base_json, config=config, timeout=timeout)
-        ok_head = _run_semgrep(repo_dir, head_json, config=config, timeout=timeout)
+        ok_base = _run_semgrep(
+            target_dir=str(base_dir),
+            out_path=base_json,
+            config=config,
+            timeout=timeout,
+            excludes=excludes,
+        )
+        ok_head = _run_semgrep(
+            target_dir=repo_dir,
+            out_path=head_json,
+            config=config,
+            timeout=timeout,
+            excludes=excludes,
+        )
 
         if not ok_base or not ok_head:
             return SemgrepBaselineResult(SCAN_FAILED, [], [], 0, 0)
@@ -156,4 +232,10 @@ def introduced_semgrep_from_pr(
         introduced = [f for f in head_findings if _fp(f) not in base_fps]
         preexisting = [f for f in head_findings if _fp(f) in base_fps]
 
-        return SemgrepBaselineResult(OK, introduced, preexisting, len(base_findings), len(head_findings))
+        return SemgrepBaselineResult(
+            OK,
+            introduced,
+            preexisting,
+            len(base_findings),
+            len(head_findings),
+        )

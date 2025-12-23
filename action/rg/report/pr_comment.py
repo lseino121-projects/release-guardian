@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from typing import List, Dict, Tuple, Optional
 from pathlib import Path
-from rg.normalize.schema import Finding
-from rg.normalize.dedupe import unified_summary, unified_summary_for_clusters
+from typing import List
 from rg.models import RDIReport
+from rg.normalize.dedupe import unified_summary, unified_summary_for_clusters
+from rg.normalize.schema import Finding
 from rg.report.decision_block import render_decision_block
+from rg.report.hints import hint_for_id
+
 
 def _md(s: str | None) -> str:
     return (s or "").replace("|", "\\|")
+
 
 def _sev_badge(sev: str | None) -> str:
     s = (sev or "").lower()
@@ -23,43 +26,7 @@ def _sev_badge(sev: str | None) -> str:
     return "⬜️"
 
 
-def _collect_dep_fixes(
-    deps_findings: List[Finding],
-) -> Dict[Tuple[str, str], List[str]]:
-    """
-    Build (pkg, ver) -> unique list of fix versions observed across scanners.
-    Assumes Finding.fixed_version is a string, sometimes comma-separated.
-    """
-    fixes: Dict[Tuple[str, str], List[str]] = {}
-
-    for f in deps_findings:
-        pkg = (f.package or "").strip()
-        ver = (f.installed_version or "").strip()
-        if not pkg or not ver:
-            continue
-
-        fv = (f.fixed_version or "").strip()
-        if not fv:
-            continue
-
-        # Some scanners return "1.2.3, 1.2.4" (comma separated)
-        parts = [p.strip() for p in fv.split(",") if p.strip()]
-        if not parts:
-            continue
-
-        key = (pkg, ver)
-        existing = fixes.get(key, [])
-        for p in parts:
-            if p not in existing:
-                existing.append(p)
-        fixes[key] = existing
-
-    return fixes
-
 def _detect_pkg_manager(workspace: str = "/github/workspace") -> str:
-    """
-    Best-effort detection. In Actions container, /github/workspace is mounted.
-    """
     p = Path(workspace)
     if (p / "pnpm-lock.yaml").exists():
         return "pnpm"
@@ -69,12 +36,10 @@ def _detect_pkg_manager(workspace: str = "/github/workspace") -> str:
         return "npm"
     return "npm"
 
+
 def _dep_fix_commands(introduced_rows: list[dict], pkg_mgr: str) -> list[str]:
-    """
-    introduced_rows are from unified_top rows: package, installed_version, etc.
-    We'll emit safe, generic commands (v1). You can refine by lockfile type later.
-    """
-    pkgs = []
+    # v1: simple, “works often enough” commands. Great for MVP.
+    pkgs: list[str] = []
     for r in introduced_rows or []:
         pkg = (r.get("package") or "").strip()
         if pkg and pkg not in pkgs:
@@ -84,24 +49,22 @@ def _dep_fix_commands(introduced_rows: list[dict], pkg_mgr: str) -> list[str]:
         return []
 
     if pkg_mgr == "pnpm":
-        # pnpm: prefer explicit add for direct deps; dedupe/lock update for transitive is trickier.
         return [f"pnpm add {p}@latest" for p in pkgs] + ["pnpm install"]
     if pkg_mgr == "yarn":
         return [f"yarn add {p}@latest" for p in pkgs] + ["yarn install"]
-    # npm default
+
     return [f"npm install {p}@latest" for p in pkgs] + ["npm install"]
 
+
 def _code_fix_commands(introduced_semgrep: List[Finding]) -> list[str]:
-    """
-    v1: no magic. Provide grep-style helpers to locate occurrences and suggested safer APIs.
-    """
+    # v1: grep helpers + 1-line guidance
     rules = {(f.id or "").lower() for f in (introduced_semgrep or [])}
     cmds: list[str] = []
 
     if any("child-process-exec" in r or "child_process.exec" in r for r in rules):
         cmds += [
             "rg \"child_process\\.exec\\(\" -n",
-            "# Prefer: child_process.execFile(...) or spawn(...) with args array",
+            "# Prefer: execFile(...) or spawn(...) with args array; never pass user input to a shell",
         ]
 
     if any("subprocess-popen-shell-true" in r for r in rules):
@@ -113,70 +76,44 @@ def _code_fix_commands(introduced_semgrep: List[Finding]) -> list[str]:
 
     return cmds
 
-def _dep_hint(pkg: str | None, ver: str | None, fixes_map: Dict[Tuple[str, str], List[str]]) -> str:
-    p = (pkg or "").strip()
-    v = (ver or "").strip()
-    if not p or not v:
-        return ""
 
-    fixes = fixes_map.get((p, v), [])
-    if not fixes:
-        return "No fix version listed."
-
-    # Keep it short: show up to 2 versions
-    show = fixes[:2]
-    more = "" if len(fixes) <= 2 else f" (+{len(fixes) - 2} more)"
-    return f"Upgrade to {', '.join(show)}{more}."
-
-
-def _semgrep_hint(rule_id: str | None) -> str:
-    """
-    Lightweight MVP hints. Keep these 1-liners.
-    Expand later via rule metadata if you want.
-    """
-    rid = (rule_id or "").lower()
-
-    # Python
-    if "subprocess-popen-shell-true" in rid:
-        return "Avoid shell=True. Use subprocess.run([...], shell=False) and validate inputs."
-
-    # JS
-    if "child-process-exec" in rid or "child_process.exec" in rid:
-        return "Avoid exec/shell. Use spawn/execFile with args array; never pass user input to shell."
-
-    # Terraform / Docker (examples; tweak to your rule IDs)
-    if "terraform" in rid and ("public" in rid or "0.0.0.0" in rid):
-        return "Restrict ingress. Avoid 0.0.0.0/0 on sensitive ports."
-
-    if "docker" in rid and ("latest" in rid):
-        return "Pin image tags/digests for reproducible builds and safer rollbacks."
-
-    return "Review and refactor to remove this risky pattern."
-
-def _unified_table(unified: dict, limit: int = 5, fixes_map: Optional[Dict[Tuple[str, str], List[str]]] = None) -> str:
+def _unified_table(unified: dict, limit: int = 5, include_hint: bool = False) -> str:
     rows = unified.get("unified_top") or []
     if not rows:
         return "_No vulnerabilities._"
 
-    fixes_map = fixes_map or {}
+    if include_hint:
+        lines = [
+            "| Worst | Package | Version | Advisories | Tools | Hint |",
+            "|---|---|---|---|---|---|",
+        ]
+    else:
+        lines = [
+            "| Worst | Package | Version | Advisories | Tools |",
+            "|---|---|---|---|---|",
+        ]
 
-    lines = [
-        "| Worst | Package | Version | Advisories | Tools | Hint |",
-        "|---|---|---|---|---|---|",
-    ]
     for r in rows[:limit]:
         worst = (r.get("worst_severity") or "").lower()
-        badge = _sev_badge(worst)
-        worst_cell = f"{badge} {_md(worst.upper())}".strip()
+        worst_cell = f"{_sev_badge(worst)} {_md(worst.upper())}".strip()
 
-        pkg = r.get("package")
-        ver = r.get("installed_version")
-        hint = _dep_hint(pkg, ver, fixes_map)
+        advs = r.get("advisories") or []
+        advs_str = ", ".join(advs)
+        tools_str = ", ".join(r.get("tools") or [])
 
-        lines.append(
-            f"| {worst_cell} | {_md(pkg)} | {_md(ver)} | "
-            f"{_md(', '.join(r.get('advisories') or []))} | {_md(', '.join(r.get('tools') or []))} | {_md(hint)} |"
-        )
+        if include_hint:
+            # pick first advisory ID (CVE/GHSA) to lookup hint
+            hint = hint_for_id(advs[0]) if advs else ""
+            lines.append(
+                f"| {worst_cell} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
+                f"{_md(advs_str)} | {_md(tools_str)} | {_md(hint)} |"
+            )
+        else:
+            lines.append(
+                f"| {worst_cell} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
+                f"{_md(advs_str)} | {_md(tools_str)} |"
+            )
+
     return "\n".join(lines)
 
 
@@ -195,14 +132,14 @@ def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool =
         for f in findings_sorted:
             sev = (f.severity or "").lower()
             sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
-            hint = _semgrep_hint(f.id)
+
+            hint = (f.hint or "").strip() or hint_for_id(f.id)
 
             lines.append(
                 f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(hint)} |"
             )
         return "\n".join(lines)
 
-    # default (no hint column)
     lines = [
         "| Severity | Rule | File | Line |",
         "|---|---|---|---|",
@@ -210,19 +147,31 @@ def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool =
     for f in findings_sorted:
         sev = (f.severity or "").lower()
         sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
+        lines.append(f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |")
 
-        lines.append(
-            f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |"
-        )
     return "\n".join(lines)
 
 
-def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
+def _top_findings_table(findings: List[Finding], limit: int = 5, include_hint: bool = False) -> str:
     if not findings:
         return "_No findings._"
 
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     findings_sorted = sorted(findings, key=lambda f: order.get((f.severity or "").lower(), 99))[:limit]
+
+    if include_hint:
+        lines = [
+            "| Severity | ID | Package | Installed | Fix | Hint |",
+            "|---|---|---|---|---|---|",
+        ]
+        for f in findings_sorted:
+            sev = (f.severity or "").lower()
+            sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
+            hint = hint_for_id(f.id)
+            lines.append(
+                f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} | {_md(hint)} |"
+            )
+        return "\n".join(lines)
 
     lines = [
         "| Severity | ID | Package | Installed | Fix |",
@@ -231,10 +180,10 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
     for f in findings_sorted:
         sev = (f.severity or "").lower()
         sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
-
         lines.append(
             f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} |"
         )
+
     return "\n".join(lines)
 
 
@@ -250,82 +199,77 @@ def render_pr_comment_md(
 
     deps_findings = trivy_findings + grype_findings
     unified_all = unified_summary(deps_findings)
-    fixes_map = _collect_dep_fixes(deps_findings)
 
     introduced_ct = int(report.context.get("introduced_clusters", 0) or 0)
     preexisting_ct = int(report.context.get("preexisting_clusters", 0) or 0)
     changed_pkgs_ct = int(report.context.get("changed_pkgs_count", 0) or 0)
 
-    # Important: distinguish between "not provided" (None) vs "provided but empty" ([]).
     introduced_clusters_raw = report.context.get("introduced_clusters_list", None)
-    introduced_deps: dict = {"unified_top": []}
 
     introduced_deps_note = ""
+    introduced_rows: list[dict] = []
     if introduced_clusters_raw is None:
         introduced_deps_table = "_(Introduced dependency clusters list not provided to renderer yet.)_"
-        introduced_deps_note = (
-            "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
-        )
+        introduced_deps_note = "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
     else:
         introduced_clusters = introduced_clusters_raw or []
         if not introduced_clusters:
             introduced_deps_table = "_No introduced dependency vulnerabilities._"
-            # introduced_deps stays as default {"unified_top": []}
         else:
             introduced_deps = unified_summary_for_clusters(deps_findings, introduced_clusters)
-            introduced_deps_table = _unified_table(introduced_deps)
+            introduced_rows = introduced_deps.get("unified_top") or []
+            introduced_deps_table = _unified_table(introduced_deps, include_hint=True)
 
     introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings, include_hint=True)
+
+    # Quick fix block (copy/paste)
     pkg_mgr = _detect_pkg_manager()
-    introduced_rows = introduced_deps.get("unified_top") or []
     dep_cmds = _dep_fix_commands(introduced_rows, pkg_mgr)
     code_cmds = _code_fix_commands(introduced_semgrep_findings)
 
-    fix_lines = []
+    fix_lines: list[str] = []
     if dep_cmds:
-        fix_lines.append(f"**Dependency fixes ({pkg_mgr}):**")
-        fix_lines.append("```bash")
-        fix_lines.extend(dep_cmds[:6])
-        fix_lines.append("```")
-
+        fix_lines += [
+            f"**Dependency fixes ({pkg_mgr}):**",
+            "```bash",
+            *dep_cmds[:8],
+            "```",
+        ]
     if code_cmds:
-        fix_lines.append("**Code fixes (helpers):**")
-        fix_lines.append("```bash")
-        fix_lines.extend(code_cmds[:8])
-        fix_lines.append("```")
-
+        fix_lines += [
+            "**Code fixes (helpers):**",
+            "```bash",
+            *code_cmds[:10],
+            "```",
+        ]
     quick_fix_block = "\n".join(fix_lines) if fix_lines else "_No quick-fix commands available._"
 
-
-    # Semgrep baseline counts (optional but helps explain "why GO even with findings on HEAD")
+    # Semgrep baseline counts (helps explain “why GO even with findings on HEAD”)
     semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
     semgrep_pre = int(report.context.get("semgrep_preexisting_count", 0) or 0)
     semgrep_baseline_line = f"_Baseline: introduced={semgrep_intro}, preexisting={semgrep_pre}_"
 
-    verdict = report.verdict
-    score = report.rdi_score
-
-    if verdict == "go":
-        header = f"✅ **Go** — RDI **{score}**"
-    elif verdict == "conditional":
-        header = f"⚠️ **Conditional** — RDI **{score}**"
-    else:
-        header = f"❌ **No-Go** — RDI **{score}**"
-
     notes = (report.notes or [])[:6]
     why_lines = "\n".join([f"- {_md(n)}" for n in notes]) if notes else "- (No notes)"
 
-    # details sections
-    trivy_table = _top_findings_table(trivy_findings)
-    grype_table = _top_findings_table(grype_findings)
-    semgrep_table = _semgrep_table(semgrep_findings)
+    # Details sections (keep tight; hints optional)
+    trivy_table = _top_findings_table(trivy_findings, include_hint=False)
+    grype_table = _top_findings_table(grype_findings, include_hint=False)
+    semgrep_table = _semgrep_table(semgrep_findings, include_hint=False)
 
-    unified_all_table = _unified_table(unified_all)
+    unified_all_table = _unified_table(unified_all, include_hint=False)
+
+    worst_all = "NONE" if unified_all.get("clusters_count") == 0 else (
+        unified_all["worst_severity"].upper() if unified_all.get("worst_severity") else "UNKNOWN"
+    )
 
     md = f"""{marker}
 {decision_block}
 
 ---
+
+### Why
+{why_lines}
 
 ### Introduced risk (what this PR adds)
 **Dependencies (introduced clusters):** {introduced_ct}  
@@ -361,7 +305,7 @@ def render_pr_comment_md(
 ### Dependency vulnerability snapshot (all tools)
 - **Clusters (pkg@version):** {unified_all["clusters_count"]}
 - **Total advisories (all tools):** {unified_all["advisories_count"]}
-- **Worst severity:** {"NONE" if unified_all["clusters_count"] == 0 else (unified_all["worst_severity"].upper() if unified_all["worst_severity"] else "UNKNOWN")}
+- **Worst severity:** {worst_all}
 - **Introduced clusters:** {introduced_ct} | **Pre-existing clusters:** {preexisting_ct} | **Changed packages:** {changed_pkgs_ct}
 
 {unified_all_table}
