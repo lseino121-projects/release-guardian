@@ -35,25 +35,92 @@ def _detect_pkg_manager(workspace: str = "/github/workspace") -> str:
     if (p / "package-lock.json").exists():
         return "npm"
     return "npm"
+def _dep_fix_commands(
+    introduced_rows: list[dict],
+    pkg_mgr: str,
+    fixes_map: dict[tuple[str, str], list[str]],
+) -> list[str]:
+    """
+    Upgrade introduced dependency vulns with best-effort fix versions.
+    If fix version is known, also emit override/resolution snippet for transitive deps.
+    """
+    def best_fix(versions: list[str]) -> str | None:
+        if not versions:
+            return None
+        for v in versions:
+            v = (v or "").strip()
+            if v and v[0].isdigit():
+                return v
+        v0 = (versions[0] or "").strip()
+        return v0 or None
 
+    def override_snippet(pm: str, pkg: str, ver: str) -> list[str]:
+        if pm == "yarn":
+            return [
+                "# If this is transitive, pin via package.json:",
+                "# {",
+                "#   \"resolutions\": {",
+                f"#     \"{pkg}\": \"{ver}\"",
+                "#   }",
+                "# }",
+                "yarn install",
+            ]
+        if pm == "pnpm":
+            return [
+                "# If this is transitive, pin via package.json:",
+                "# {",
+                "#   \"pnpm\": {",
+                "#     \"overrides\": {",
+                f"#       \"{pkg}\": \"{ver}\"",
+                "#     }",
+                "#   }",
+                "# }",
+                "pnpm install",
+            ]
+        return [
+            "# If this is transitive, pin via package.json:",
+            "# {",
+            "#   \"overrides\": {",
+            f"#     \"{pkg}\": \"{ver}\"",
+            "#   }",
+            "# }",
+            "npm install",
+        ]
 
-def _dep_fix_commands(introduced_rows: list[dict], pkg_mgr: str) -> list[str]:
-    # v1: “works often enough” commands. (Direct deps only; transitive upgrades vary by ecosystem.)
-    pkgs: list[str] = []
+    cmds: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
     for r in introduced_rows or []:
         pkg = (r.get("package") or "").strip()
-        if pkg and pkg not in pkgs:
-            pkgs.append(pkg)
+        installed = (r.get("installed_version") or "").strip()
+        if not pkg or not installed:
+            continue
 
-    if not pkgs:
-        return []
+        key = (pkg, installed)
+        if key in seen:
+            continue
+        seen.add(key)
 
-    if pkg_mgr == "pnpm":
-        return [f"pnpm add {p}@latest" for p in pkgs] + ["pnpm install"]
-    if pkg_mgr == "yarn":
-        return [f"yarn add {p}@latest" for p in pkgs] + ["yarn install"]
+        fixes = fixes_map.get(key, [])
+        ver = best_fix(fixes)
+        target = ver or "latest"
 
-    return [f"npm install {p}@latest" for p in pkgs] + ["npm install"]
+        if pkg_mgr == "pnpm":
+            cmds.append(f"pnpm add {pkg}@{target}")
+        elif pkg_mgr == "yarn":
+            cmds.append(f"yarn add {pkg}@{target}")
+        else:
+            cmds.append(f"npm install {pkg}@{target}")
+
+        if ver:
+            cmds.extend(override_snippet(pkg_mgr, pkg, ver))
+
+        cmds.append("")
+
+    while cmds and cmds[-1] == "":
+        cmds.pop()
+
+    return cmds
 
 
 def _code_fix_commands(introduced_semgrep: List[Finding]) -> list[str]:
@@ -116,6 +183,89 @@ def _unified_table(unified: dict, limit: int = 5, include_hint: bool = False) ->
             )
 
     return "\n".join(lines)
+
+def _collect_dep_fixes(deps_findings: List[Finding]) -> dict[tuple[str, str], list[str]]:
+    """
+    Build (pkg, installed_version) -> unique list of fix versions observed across scanners.
+    """
+    fixes: dict[tuple[str, str], list[str]] = {}
+    for f in deps_findings:
+        pkg = (f.package or "").strip()
+        ver = (f.installed_version or "").strip()
+        if not pkg or not ver:
+            continue
+
+        raw = (f.fixed_version or "")
+        raw = raw.strip() if isinstance(raw, str) else ""
+        if not raw:
+            continue
+
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if not parts:
+            continue
+
+        key = (pkg, ver)
+        existing = fixes.get(key, [])
+        for p in parts:
+            if p not in existing:
+                existing.append(p)
+        fixes[key] = existing
+
+    return fixes
+
+def _best_fix_version(versions: list[str]) -> str | None:
+    """
+    v1 heuristic:
+    - Prefer first "real-looking" version token (starts with digit)
+    - Otherwise just return first token
+    (We can add proper semver sorting later; this works well enough for MVP.)
+    """
+    if not versions:
+        return None
+    for v in versions:
+        v = (v or "").strip()
+        if v and v[0].isdigit():
+            return v
+    return (versions[0] or "").strip() or None
+
+
+def _override_snippet(pkg_mgr: str, pkg: str, ver: str) -> list[str]:
+    """
+    Provide ecosystem-native “force a transitive upgrade” guidance.
+    This is the real “aha” for teams when the vuln is not a direct dependency.
+    """
+    if pkg_mgr == "yarn":
+        return [
+            "# If this is transitive, pin via package.json:",
+            "# {",
+            "#   \"resolutions\": {",
+            f"#     \"{pkg}\": \"{ver}\"",
+            "#   }",
+            "# }",
+            "yarn install",
+        ]
+    if pkg_mgr == "pnpm":
+        return [
+            "# If this is transitive, pin via package.json:",
+            "# {",
+            "#   \"pnpm\": {",
+            "#     \"overrides\": {",
+            f"#       \"{pkg}\": \"{ver}\"",
+            "#     }",
+            "#   }",
+            "# }",
+            "pnpm install",
+        ]
+    # npm default
+    return [
+        "# If this is transitive, pin via package.json:",
+        "# {",
+        "#   \"overrides\": {",
+        f"#     \"{pkg}\": \"{ver}\"",
+        "#   }",
+        "# }",
+        "npm install",
+    ]
 
 
 def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool = False) -> str:
@@ -210,9 +360,9 @@ def render_pr_comment_md(
 
     introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings, include_hint=True)
 
-    # Quick fix block (copy/paste) — only show when there is introduced risk
     pkg_mgr = _detect_pkg_manager()
-    dep_cmds = _dep_fix_commands(introduced_rows, pkg_mgr)
+    fixes_map = _collect_dep_fixes(deps_findings)
+    dep_cmds = _dep_fix_commands(introduced_rows, pkg_mgr, fixes_map)
     code_cmds = _code_fix_commands(introduced_semgrep_findings)
 
     fix_lines: list[str] = []
