@@ -164,18 +164,6 @@ def _fp(f: Finding) -> str:
     # v1 fingerprint: rule + file + line
     return f"{f.id}|{f.package or ''}|{f.installed_version or ''}"
 
-
-from __future__ import annotations
-
-import tempfile
-from pathlib import Path
-from typing import Optional, Set, List
-
-from rg.normalize.semgrep_norm import normalize_semgrep
-from rg.rdi.semgrep_types import SemgrepBaselineResult, OK, REF_UNAVAILABLE, SCAN_FAILED  # adjust imports if different
-# assumes _git_safe, _git_archive_to_dir, _run_semgrep, _fp already exist in this module
-
-
 def introduced_semgrep_from_pr(
     base_ref: str,
     head_ref: str,
