@@ -258,26 +258,26 @@ def render_pr_comment_md(
 
     # Important: distinguish between "not provided" (None) vs "provided but empty" ([]).
     introduced_clusters_raw = report.context.get("introduced_clusters_list", None)
+    introduced_deps: dict = {"unified_top": []}
 
     introduced_deps_note = ""
     if introduced_clusters_raw is None:
-        # Truly missing: we can't filter precisely.
         introduced_deps_table = "_(Introduced dependency clusters list not provided to renderer yet.)_"
         introduced_deps_note = (
             "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
         )
     else:
-        # Provided (could be empty list, which is a valid/normal case).
         introduced_clusters = introduced_clusters_raw or []
         if not introduced_clusters:
             introduced_deps_table = "_No introduced dependency vulnerabilities._"
+            # introduced_deps stays as default {"unified_top": []}
         else:
             introduced_deps = unified_summary_for_clusters(deps_findings, introduced_clusters)
-            introduced_deps_table = _unified_table(introduced_deps, fixes_map=fixes_map)
+            introduced_deps_table = _unified_table(introduced_deps)
 
     introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings, include_hint=True)
     pkg_mgr = _detect_pkg_manager()
-    introduced_rows = (introduced_deps.get("unified_top") or []) if introduced_clusters_raw is not None else []
+    introduced_rows = introduced_deps.get("unified_top") or []
     dep_cmds = _dep_fix_commands(introduced_rows, pkg_mgr)
     code_cmds = _code_fix_commands(introduced_semgrep_findings)
 
