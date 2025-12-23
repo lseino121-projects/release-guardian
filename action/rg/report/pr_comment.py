@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Dict, Tuple, Optional
-
+from pathlib import Path
 from rg.normalize.schema import Finding
 from rg.normalize.dedupe import unified_summary, unified_summary_for_clusters
 from rg.models import RDIReport
@@ -56,6 +56,62 @@ def _collect_dep_fixes(
 
     return fixes
 
+def _detect_pkg_manager(workspace: str = "/github/workspace") -> str:
+    """
+    Best-effort detection. In Actions container, /github/workspace is mounted.
+    """
+    p = Path(workspace)
+    if (p / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (p / "yarn.lock").exists():
+        return "yarn"
+    if (p / "package-lock.json").exists():
+        return "npm"
+    return "npm"
+
+def _dep_fix_commands(introduced_rows: list[dict], pkg_mgr: str) -> list[str]:
+    """
+    introduced_rows are from unified_top rows: package, installed_version, etc.
+    We'll emit safe, generic commands (v1). You can refine by lockfile type later.
+    """
+    pkgs = []
+    for r in introduced_rows or []:
+        pkg = (r.get("package") or "").strip()
+        if pkg and pkg not in pkgs:
+            pkgs.append(pkg)
+
+    if not pkgs:
+        return []
+
+    if pkg_mgr == "pnpm":
+        # pnpm: prefer explicit add for direct deps; dedupe/lock update for transitive is trickier.
+        return [f"pnpm add {p}@latest" for p in pkgs] + ["pnpm install"]
+    if pkg_mgr == "yarn":
+        return [f"yarn add {p}@latest" for p in pkgs] + ["yarn install"]
+    # npm default
+    return [f"npm install {p}@latest" for p in pkgs] + ["npm install"]
+
+def _code_fix_commands(introduced_semgrep: List[Finding]) -> list[str]:
+    """
+    v1: no magic. Provide grep-style helpers to locate occurrences and suggested safer APIs.
+    """
+    rules = {(f.id or "").lower() for f in (introduced_semgrep or [])}
+    cmds: list[str] = []
+
+    if any("child-process-exec" in r or "child_process.exec" in r for r in rules):
+        cmds += [
+            "rg \"child_process\\.exec\\(\" -n",
+            "# Prefer: child_process.execFile(...) or spawn(...) with args array",
+        ]
+
+    if any("subprocess-popen-shell-true" in r for r in rules):
+        cmds += [
+            "rg \"subprocess\\.(Popen|run|call)\\(\" -n",
+            "rg \"shell\\s*=\\s*True\" -n",
+            "# Prefer: subprocess.run([...], shell=False) and validate inputs",
+        ]
+
+    return cmds
 
 def _dep_hint(pkg: str | None, ver: str | None, fixes_map: Dict[Tuple[str, str], List[str]]) -> str:
     p = (pkg or "").strip()
@@ -220,6 +276,26 @@ def render_pr_comment_md(
             introduced_deps_table = _unified_table(introduced_deps, fixes_map=fixes_map)
 
     introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings, include_hint=True)
+    pkg_mgr = _detect_pkg_manager()
+    introduced_rows = (introduced_deps.get("unified_top") or []) if introduced_clusters_raw is not None else []
+    dep_cmds = _dep_fix_commands(introduced_rows, pkg_mgr)
+    code_cmds = _code_fix_commands(introduced_semgrep_findings)
+
+    fix_lines = []
+    if dep_cmds:
+        fix_lines.append(f"**Dependency fixes ({pkg_mgr}):**")
+        fix_lines.append("```bash")
+        fix_lines.extend(dep_cmds[:6])
+        fix_lines.append("```")
+
+    if code_cmds:
+        fix_lines.append("**Code fixes (helpers):**")
+        fix_lines.append("```bash")
+        fix_lines.extend(code_cmds[:8])
+        fix_lines.append("```")
+
+    quick_fix_block = "\n".join(fix_lines) if fix_lines else "_No quick-fix commands available._"
+
 
     # Semgrep baseline counts (optional but helps explain "why GO even with findings on HEAD")
     semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
@@ -258,6 +334,9 @@ def render_pr_comment_md(
 
 **Code (Semgrep introduced):** {len(introduced_semgrep_findings)}
 {introduced_semgrep_table}
+
+### Quick fix (copy/paste)
+{quick_fix_block}
 
 <details>
 <summary><b>Details: Top findings (Trivy)</b></summary>
