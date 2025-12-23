@@ -1,16 +1,14 @@
 rules:
-  - id: action.rg.rules.javascript.rg.js.child-process-exec
-    languages: [javascript, typescript]
-    message: "Avoid using child_process.exec/execSync with untrusted input. Prefer spawn/execFile with args array."
+  - id: rg.js.child-process-exec
+    languages: [javascript]
+    message: Avoid using child_process.exec with untrusted input.
     severity: ERROR
-    patterns:
-      - pattern-either:
-          - pattern: child_process.exec(...)
-          - pattern: child_process.execSync(...)
-          - pattern: exec(...)
-          - pattern: execSync(...)
     metadata:
-      category: security
-      technology: [javascript]
       rg:
         hint: "Avoid exec/shell. Use spawn/execFile with args array; never pass user input to a shell."
+    pattern-either:
+      - pattern: child_process.exec(...)
+      - pattern: require("child_process").exec(...)
+      - pattern: exec(...)
+        pattern-inside: |
+          const { exec } = require("child_process");

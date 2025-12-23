@@ -1,0 +1,26 @@
+{
+  "name": "release-guardian",
+  "version": "1.0.0",
+  "description": "**Release Guardian** is a decision engine for pull requests.",
+  "main": "bad.js",
+  "directories": {
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lseino121-projects/release-guardian.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/lseino121-projects/release-guardian/issues"
+  },
+  "homepage": "https://github.com/lseino121-projects/release-guardian#readme",
+  "dependencies": {
+    "minimist": "^0.0.8"
+  }
+}
