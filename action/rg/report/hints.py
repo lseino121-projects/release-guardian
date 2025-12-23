@@ -5,9 +5,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional
 
-import yaml
-
-
 def _rule_files(rules_dir: Path) -> Iterable[Path]:
     if not rules_dir.exists():
         return []
