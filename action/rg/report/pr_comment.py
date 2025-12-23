@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Dict, Tuple, Optional
 
 from rg.normalize.schema import Finding
 from rg.normalize.dedupe import unified_summary, unified_summary_for_clusters
@@ -23,34 +23,130 @@ def _sev_badge(sev: str | None) -> str:
     return "⬜️"
 
 
-def _unified_table(unified: dict, limit: int = 5) -> str:
+def _collect_dep_fixes(
+    deps_findings: List[Finding],
+) -> Dict[Tuple[str, str], List[str]]:
+    """
+    Build (pkg, ver) -> unique list of fix versions observed across scanners.
+    Assumes Finding.fixed_version is a string, sometimes comma-separated.
+    """
+    fixes: Dict[Tuple[str, str], List[str]] = {}
+
+    for f in deps_findings:
+        pkg = (f.package or "").strip()
+        ver = (f.installed_version or "").strip()
+        if not pkg or not ver:
+            continue
+
+        fv = (f.fixed_version or "").strip()
+        if not fv:
+            continue
+
+        # Some scanners return "1.2.3, 1.2.4" (comma separated)
+        parts = [p.strip() for p in fv.split(",") if p.strip()]
+        if not parts:
+            continue
+
+        key = (pkg, ver)
+        existing = fixes.get(key, [])
+        for p in parts:
+            if p not in existing:
+                existing.append(p)
+        fixes[key] = existing
+
+    return fixes
+
+
+def _dep_hint(pkg: str | None, ver: str | None, fixes_map: Dict[Tuple[str, str], List[str]]) -> str:
+    p = (pkg or "").strip()
+    v = (ver or "").strip()
+    if not p or not v:
+        return ""
+
+    fixes = fixes_map.get((p, v), [])
+    if not fixes:
+        return "No fix version listed."
+
+    # Keep it short: show up to 2 versions
+    show = fixes[:2]
+    more = "" if len(fixes) <= 2 else f" (+{len(fixes) - 2} more)"
+    return f"Upgrade to {', '.join(show)}{more}."
+
+
+def _semgrep_hint(rule_id: str | None) -> str:
+    """
+    Lightweight MVP hints. Keep these 1-liners.
+    Expand later via rule metadata if you want.
+    """
+    rid = (rule_id or "").lower()
+
+    # Python
+    if "subprocess-popen-shell-true" in rid:
+        return "Avoid shell=True. Use subprocess.run([...], shell=False) and validate inputs."
+
+    # JS
+    if "child-process-exec" in rid or "child_process.exec" in rid:
+        return "Avoid exec/shell. Use spawn/execFile with args array; never pass user input to shell."
+
+    # Terraform / Docker (examples; tweak to your rule IDs)
+    if "terraform" in rid and ("public" in rid or "0.0.0.0" in rid):
+        return "Restrict ingress. Avoid 0.0.0.0/0 on sensitive ports."
+
+    if "docker" in rid and ("latest" in rid):
+        return "Pin image tags/digests for reproducible builds and safer rollbacks."
+
+    return "Review and refactor to remove this risky pattern."
+
+def _unified_table(unified: dict, limit: int = 5, fixes_map: Optional[Dict[Tuple[str, str], List[str]]] = None) -> str:
     rows = unified.get("unified_top") or []
     if not rows:
         return "_No vulnerabilities._"
 
+    fixes_map = fixes_map or {}
+
     lines = [
-        "| Worst | Package | Version | Advisories | Tools |",
-        "|---|---|---|---|---|",
+        "| Worst | Package | Version | Advisories | Tools | Hint |",
+        "|---|---|---|---|---|---|",
     ]
     for r in rows[:limit]:
         worst = (r.get("worst_severity") or "").lower()
         badge = _sev_badge(worst)
         worst_cell = f"{badge} {_md(worst.upper())}".strip()
 
+        pkg = r.get("package")
+        ver = r.get("installed_version")
+        hint = _dep_hint(pkg, ver, fixes_map)
+
         lines.append(
-            f"| {worst_cell} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
-            f"{_md(', '.join(r.get('advisories') or []))} | {_md(', '.join(r.get('tools') or []))} |"
+            f"| {worst_cell} | {_md(pkg)} | {_md(ver)} | "
+            f"{_md(', '.join(r.get('advisories') or []))} | {_md(', '.join(r.get('tools') or []))} | {_md(hint)} |"
         )
     return "\n".join(lines)
 
 
-def _semgrep_table(findings: List[Finding], limit: int = 5) -> str:
+def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool = False) -> str:
     if not findings:
         return "_No findings._"
 
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     findings_sorted = sorted(findings, key=lambda f: order.get((f.severity or "").lower(), 99))[:limit]
 
+    if include_hint:
+        lines = [
+            "| Severity | Rule | File | Line | Hint |",
+            "|---|---|---|---|---|",
+        ]
+        for f in findings_sorted:
+            sev = (f.severity or "").lower()
+            sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
+            hint = _semgrep_hint(f.id)
+
+            lines.append(
+                f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(hint)} |"
+            )
+        return "\n".join(lines)
+
+    # default (no hint column)
     lines = [
         "| Severity | Rule | File | Line |",
         "|---|---|---|---|",
@@ -98,6 +194,7 @@ def render_pr_comment_md(
 
     deps_findings = trivy_findings + grype_findings
     unified_all = unified_summary(deps_findings)
+    fixes_map = _collect_dep_fixes(deps_findings)
 
     introduced_ct = int(report.context.get("introduced_clusters", 0) or 0)
     preexisting_ct = int(report.context.get("preexisting_clusters", 0) or 0)
@@ -120,9 +217,9 @@ def render_pr_comment_md(
             introduced_deps_table = "_No introduced dependency vulnerabilities._"
         else:
             introduced_deps = unified_summary_for_clusters(deps_findings, introduced_clusters)
-            introduced_deps_table = _unified_table(introduced_deps)
+            introduced_deps_table = _unified_table(introduced_deps, fixes_map=fixes_map)
 
-    introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings)
+    introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings, include_hint=True)
 
     # Semgrep baseline counts (optional but helps explain "why GO even with findings on HEAD")
     semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
