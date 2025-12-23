@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List
+
 from rg.models import RDIReport
 from rg.normalize.dedupe import unified_summary, unified_summary_for_clusters
 from rg.normalize.schema import Finding
 from rg.report.decision_block import render_decision_block
-from rg.report.hints import hint_for_id
 
 
 def _md(s: str | None) -> str:
@@ -38,7 +38,7 @@ def _detect_pkg_manager(workspace: str = "/github/workspace") -> str:
 
 
 def _dep_fix_commands(introduced_rows: list[dict], pkg_mgr: str) -> list[str]:
-    # v1: simple, “works often enough” commands. Great for MVP.
+    # v1: “works often enough” commands. (Direct deps only; transitive upgrades vary by ecosystem.)
     pkgs: list[str] = []
     for r in introduced_rows or []:
         pkg = (r.get("package") or "").strip()
@@ -102,8 +102,9 @@ def _unified_table(unified: dict, limit: int = 5, include_hint: bool = False) ->
         tools_str = ", ".join(r.get("tools") or [])
 
         if include_hint:
-            # pick first advisory ID (CVE/GHSA) to lookup hint
-            hint = hint_for_id(advs[0]) if advs else ""
+            # v1: dependency hints are generic (Semgrep hints come from rule metadata).
+            # Later: add CVE/GHSA remediation mapping, ecosystem-aware upgrade hints, etc.
+            hint = "Upgrade the dependency (or bump the direct parent) to a non-vulnerable version."
             lines.append(
                 f"| {worst_cell} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
                 f"{_md(advs_str)} | {_md(tools_str)} | {_md(hint)} |"
@@ -132,8 +133,7 @@ def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool =
         for f in findings_sorted:
             sev = (f.severity or "").lower()
             sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
-
-            hint = (f.hint or "").strip() or hint_for_id(f.id)
+            hint = (f.hint or "").strip() or "Review and refactor to remove this risky pattern."
 
             lines.append(
                 f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(hint)} |"
@@ -152,26 +152,12 @@ def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool =
     return "\n".join(lines)
 
 
-def _top_findings_table(findings: List[Finding], limit: int = 5, include_hint: bool = False) -> str:
+def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
     if not findings:
         return "_No findings._"
 
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     findings_sorted = sorted(findings, key=lambda f: order.get((f.severity or "").lower(), 99))[:limit]
-
-    if include_hint:
-        lines = [
-            "| Severity | ID | Package | Installed | Fix | Hint |",
-            "|---|---|---|---|---|---|",
-        ]
-        for f in findings_sorted:
-            sev = (f.severity or "").lower()
-            sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
-            hint = (f.hint or "").strip() or hint_for_id(f.id)
-            lines.append(
-                f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} | {_md(hint)} |"
-            )
-        return "\n".join(lines)
 
     lines = [
         "| Severity | ID | Package | Installed | Fix |",
@@ -208,21 +194,23 @@ def render_pr_comment_md(
 
     introduced_deps_note = ""
     introduced_rows: list[dict] = []
+    introduced_deps_table = "_No introduced dependency vulnerabilities._"  # default
+
     if introduced_clusters_raw is None:
         introduced_deps_table = "_(Introduced dependency clusters list not provided to renderer yet.)_"
-        introduced_deps_note = "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
+        introduced_deps_note = (
+            "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
+        )
     else:
         introduced_clusters = introduced_clusters_raw or []
-        if not introduced_clusters:
-            introduced_deps_table = "_No introduced dependency vulnerabilities._"
-        else:
+        if introduced_clusters:
             introduced_deps = unified_summary_for_clusters(deps_findings, introduced_clusters)
             introduced_rows = introduced_deps.get("unified_top") or []
             introduced_deps_table = _unified_table(introduced_deps, include_hint=True)
 
     introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings, include_hint=True)
 
-    # Quick fix block (copy/paste)
+    # Quick fix block (copy/paste) — only show when there is introduced risk
     pkg_mgr = _detect_pkg_manager()
     dep_cmds = _dep_fix_commands(introduced_rows, pkg_mgr)
     code_cmds = _code_fix_commands(introduced_semgrep_findings)
@@ -242,26 +230,34 @@ def render_pr_comment_md(
             *code_cmds[:10],
             "```",
         ]
-    quick_fix_block = "\n".join(fix_lines) if fix_lines else "_No quick-fix commands available._"
+    quick_fix_block = "\n".join(fix_lines)
 
-    # Semgrep baseline counts (helps explain “why GO even with findings on HEAD”)
+    # Semgrep baseline counts (helps explain “GO even with findings on HEAD snapshot”)
     semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
     semgrep_pre = int(report.context.get("semgrep_preexisting_count", 0) or 0)
     semgrep_baseline_line = f"_Baseline: introduced={semgrep_intro}, preexisting={semgrep_pre}_"
 
-    notes = (report.notes or [])[:6]
+    # “Why” should be short — decision_block already carries the decision/confidence
+    notes = (report.notes or [])[:3]
     why_lines = "\n".join([f"- {_md(n)}" for n in notes]) if notes else "- (No notes)"
 
-    # Details sections (keep tight; hints optional)
-    trivy_table = _top_findings_table(trivy_findings, include_hint=False)
-    grype_table = _top_findings_table(grype_findings, include_hint=False)
-    semgrep_table = _semgrep_table(semgrep_findings, include_hint=False)
+    # Details sections
+    trivy_table = _top_findings_table(trivy_findings)
+    grype_table = _top_findings_table(grype_findings)
+    semgrep_table = _semgrep_table(semgrep_findings)
 
-    unified_all_table = _unified_table(unified_all, include_hint=False)
+    unified_all_table = _unified_table(unified_all)
 
     worst_all = "NONE" if unified_all.get("clusters_count") == 0 else (
         unified_all["worst_severity"].upper() if unified_all.get("worst_severity") else "UNKNOWN"
     )
+
+    quick_fix_section = ""
+    if quick_fix_block:
+        quick_fix_section = f"""
+### Quick fix (copy/paste)
+{quick_fix_block}
+"""
 
     md = f"""{marker}
 {decision_block}
@@ -278,10 +274,7 @@ def render_pr_comment_md(
 
 **Code (Semgrep introduced):** {len(introduced_semgrep_findings)}
 {introduced_semgrep_table}
-
-### Quick fix (copy/paste)
-{quick_fix_block}
-
+{quick_fix_section}
 <details>
 <summary><b>Details: Top findings (Trivy)</b></summary>
 
@@ -295,7 +288,7 @@ def render_pr_comment_md(
 </details>
 
 <details>
-<summary><b>Details: Semgrep findings on HEAD</b></summary>
+<summary><b>Details: Semgrep findings (HEAD snapshot)</b></summary>
 
 {semgrep_baseline_line}
 
