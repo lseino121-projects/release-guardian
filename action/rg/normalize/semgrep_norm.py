@@ -131,9 +131,14 @@ def normalize_semgrep(path: str) -> List[Finding]:
 
         hint = _semgrep_hint(r)
 
+        title = hint or extra.get("message") or check_id or "Semgrep finding"
+        title = _first_line(str(title))
+
         out.append(
             Finding(
                 tool="semgrep",
+                type="code",
+                title=title,
                 severity=sev,
                 id=check_id,
                 package=file_path,       # file path
@@ -142,5 +147,6 @@ def normalize_semgrep(path: str) -> List[Finding]:
                 hint=hint or None,
             )
         )
+
 
     return out
