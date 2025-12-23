@@ -167,7 +167,7 @@ def _top_findings_table(findings: List[Finding], limit: int = 5, include_hint: b
         for f in findings_sorted:
             sev = (f.severity or "").lower()
             sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
-            hint = hint_for_id(f.id)
+            hint = (f.hint or "").strip() or hint_for_id(f.id)
             lines.append(
                 f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} | {_md(hint)} |"
             )
