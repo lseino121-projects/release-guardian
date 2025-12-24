@@ -396,8 +396,10 @@ def render_pr_comment_md(
 {semgrep_table}
 </details>
 
-### Dependency vulnerability snapshot (all tools)
+### Dependency vulnerability snapshot (HEAD, includes pre-existing)
+_This section is informational. Gating is based on **introduced** risk only._
 - **Clusters (pkg@version):** {unified_all["clusters_count"]}
+- **Introduced deps worst:** {(report.context.get("introduced_dep_worst_severity") or "NONE").upper()}
 - **Total advisories (all tools):** {unified_all["advisories_count"]}
 - **Worst severity:** {worst_all}
 - **Introduced clusters:** {introduced_ct} | **Pre-existing clusters:** {preexisting_ct} | **Changed packages:** {changed_pkgs_ct}
