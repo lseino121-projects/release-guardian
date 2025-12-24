@@ -35,6 +35,8 @@ def _detect_pkg_manager(workspace: str = "/github/workspace") -> str:
     if (p / "package-lock.json").exists():
         return "npm"
     return "npm"
+
+
 def _dep_fix_commands(
     introduced_rows: list[dict],
     pkg_mgr: str,
@@ -124,7 +126,6 @@ def _dep_fix_commands(
 
 
 def _code_fix_commands(introduced_semgrep: List[Finding]) -> list[str]:
-    # v1: grep helpers + 1-line guidance
     rules = {(f.id or "").lower() for f in (introduced_semgrep or [])}
     cmds: list[str] = []
 
@@ -169,8 +170,6 @@ def _unified_table(unified: dict, limit: int = 5, include_hint: bool = False) ->
         tools_str = ", ".join(r.get("tools") or [])
 
         if include_hint:
-            # v1: dependency hints are generic (Semgrep hints come from rule metadata).
-            # Later: add CVE/GHSA remediation mapping, ecosystem-aware upgrade hints, etc.
             hint = "Upgrade the dependency (or bump the direct parent) to a non-vulnerable version."
             lines.append(
                 f"| {worst_cell} | {_md(r.get('package'))} | {_md(r.get('installed_version'))} | "
@@ -183,6 +182,7 @@ def _unified_table(unified: dict, limit: int = 5, include_hint: bool = False) ->
             )
 
     return "\n".join(lines)
+
 
 def _collect_dep_fixes(deps_findings: List[Finding]) -> dict[tuple[str, str], list[str]]:
     """
@@ -213,60 +213,6 @@ def _collect_dep_fixes(deps_findings: List[Finding]) -> dict[tuple[str, str], li
 
     return fixes
 
-def _best_fix_version(versions: list[str]) -> str | None:
-    """
-    v1 heuristic:
-    - Prefer first "real-looking" version token (starts with digit)
-    - Otherwise just return first token
-    (We can add proper semver sorting later; this works well enough for MVP.)
-    """
-    if not versions:
-        return None
-    for v in versions:
-        v = (v or "").strip()
-        if v and v[0].isdigit():
-            return v
-    return (versions[0] or "").strip() or None
-
-
-def _override_snippet(pkg_mgr: str, pkg: str, ver: str) -> list[str]:
-    """
-    Provide ecosystem-native “force a transitive upgrade” guidance.
-    This is the real “aha” for teams when the vuln is not a direct dependency.
-    """
-    if pkg_mgr == "yarn":
-        return [
-            "# If this is transitive, pin via package.json:",
-            "# {",
-            "#   \"resolutions\": {",
-            f"#     \"{pkg}\": \"{ver}\"",
-            "#   }",
-            "# }",
-            "yarn install",
-        ]
-    if pkg_mgr == "pnpm":
-        return [
-            "# If this is transitive, pin via package.json:",
-            "# {",
-            "#   \"pnpm\": {",
-            "#     \"overrides\": {",
-            f"#       \"{pkg}\": \"{ver}\"",
-            "#     }",
-            "#   }",
-            "# }",
-            "pnpm install",
-        ]
-    # npm default
-    return [
-        "# If this is transitive, pin via package.json:",
-        "# {",
-        "#   \"overrides\": {",
-        f"#     \"{pkg}\": \"{ver}\"",
-        "#   }",
-        "# }",
-        "npm install",
-    ]
-
 
 def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool = False) -> str:
     if not findings:
@@ -284,7 +230,6 @@ def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool =
             sev = (f.severity or "").lower()
             sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
             hint = (f.hint or "").strip() or "Review and refactor to remove this risky pattern."
-
             lines.append(
                 f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(hint)} |"
             )
@@ -344,7 +289,7 @@ def render_pr_comment_md(
 
     introduced_deps_note = ""
     introduced_rows: list[dict] = []
-    introduced_deps_table = "_No introduced dependency vulnerabilities._"  # default
+    introduced_deps_table = "_No introduced dependency vulnerabilities._"
 
     if introduced_clusters_raw is None:
         introduced_deps_table = "_(Introduced dependency clusters list not provided to renderer yet.)_"
@@ -380,16 +325,26 @@ def render_pr_comment_md(
             *code_cmds[:10],
             "```",
         ]
-    quick_fix_block = "\n".join(fix_lines)
+
+    quick_fix_block = "\n".join(fix_lines).strip() if fix_lines else "_No quick-fix commands available._"
 
     # Semgrep baseline counts (helps explain “GO even with findings on HEAD snapshot”)
     semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
     semgrep_pre = int(report.context.get("semgrep_preexisting_count", 0) or 0)
     semgrep_baseline_line = f"_Baseline: introduced={semgrep_intro}, preexisting={semgrep_pre}_"
 
-    # “Why” should be short — decision_block already carries the decision/confidence
-    notes = (report.notes or [])[:3]
-    why_lines = "\n".join([f"- {_md(n)}" for n in notes]) if notes else "- (No notes)"
+    # ✅ Canonical WHY: show the gate narrative + gate decision (last 2 notes),
+    # and optionally the baseline line (first note) if present.
+    notes_all = report.notes or []
+    why_notes: list[str] = []
+    if notes_all:
+        why_notes.append(notes_all[0])              # Baselines: ...
+    if len(notes_all) >= 3:
+        why_notes.extend(notes_all[-2:])            # gate narrative + decision
+    elif len(notes_all) >= 2:
+        why_notes.append(notes_all[-1])             # at least the decision line
+
+    why_lines = "\n".join([f"- {_md(n)}" for n in why_notes]) if why_notes else "- (No notes)"
 
     # Details sections
     trivy_table = _top_findings_table(trivy_findings)
@@ -401,13 +356,6 @@ def render_pr_comment_md(
     worst_all = "NONE" if unified_all.get("clusters_count") == 0 else (
         unified_all["worst_severity"].upper() if unified_all.get("worst_severity") else "UNKNOWN"
     )
-
-    quick_fix_section = ""
-    if quick_fix_block:
-        quick_fix_section = f"""
-### Quick fix (copy/paste)
-{quick_fix_block}
-"""
 
     md = f"""{marker}
 {decision_block}
@@ -424,7 +372,10 @@ def render_pr_comment_md(
 
 **Code (Semgrep introduced):** {len(introduced_semgrep_findings)}
 {introduced_semgrep_table}
-{quick_fix_section}
+
+### Quick fix (copy/paste)
+{quick_fix_block}
+
 <details>
 <summary><b>Details: Top findings (Trivy)</b></summary>
 
