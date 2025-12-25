@@ -1,9 +1,9 @@
+# main.py
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Tuple, Optional
 
 from rg.github_context import load_context
 from rg.models import RDIReport
@@ -25,6 +25,13 @@ from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 
 from rg.report.pr_comment import render_pr_comment_md
 from rg.rdi.introduced_sbom import introduced_packages_from_sbom_pr
+
+
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _sev_rank(sev: str | None) -> int:
+    return _SEV_RANK.get((sev or "").lower(), 99)
 
 
 def _baseline_penalty(status: str) -> int:
@@ -60,6 +67,114 @@ def _unique_ids(findings_list) -> int:
         if fid:
             ids.add(fid)
     return len(ids)
+
+
+def _best_fix_version(raw: str | None) -> str | None:
+    """
+    Trivy sometimes returns "1.2.6, 0.2.4" etc. Grype may be empty.
+    v1 heuristic: first token that looks like a version (starts with digit).
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        return None
+    for p in parts:
+        if p and p[0].isdigit():
+            return p
+    return parts[0] or None
+
+
+def _pick_blocking_dep(introduced_dep_findings) -> tuple[str, str]:
+    """
+    Deterministic "aha" line for deps:
+      - choose worst severity finding, then pkg, then installed_version, then vuln id
+      - include up to 3 advisory IDs
+      - include best observed fix version if available
+    """
+    if not introduced_dep_findings:
+        return "", ""
+
+    f0 = sorted(
+        introduced_dep_findings,
+        key=lambda f: (
+            _sev_rank(getattr(f, "severity", None)),
+            str(getattr(f, "package", "") or ""),
+            str(getattr(f, "installed_version", "") or ""),
+            str(getattr(f, "id", "") or ""),
+        ),
+    )[0]
+
+    pkg = (getattr(f0, "package", "") or "").strip()
+    ver = (getattr(f0, "installed_version", "") or "").strip()
+    sev = (getattr(f0, "severity", "") or "").strip().upper() or "UNKNOWN"
+
+    ids = sorted(
+        {
+            (getattr(f, "id", "") or "").strip()
+            for f in introduced_dep_findings
+            if (getattr(f, "package", "") or "").strip() == pkg
+            and (getattr(f, "installed_version", "") or "").strip() == ver
+            and (getattr(f, "id", "") or "").strip()
+        }
+    )
+    ids_str = ", ".join(ids[:3]) + ("…" if len(ids) > 3 else "")
+
+    # Pick best fix version observed for this pkg@ver across findings
+    fix_candidates: list[str] = []
+    for f in introduced_dep_findings:
+        if (getattr(f, "package", "") or "").strip() != pkg:
+            continue
+        if (getattr(f, "installed_version", "") or "").strip() != ver:
+            continue
+        fx = _best_fix_version(getattr(f, "fixed_version", None))
+        if fx and fx not in fix_candidates:
+            fix_candidates.append(fx)
+    best_fix = fix_candidates[0] if fix_candidates else None
+
+    summary = f"🟥 {sev} deps: {pkg}@{ver}" + (f" — {ids_str}" if ids_str else "")
+    if best_fix:
+        fix = f"Fix: upgrade {pkg} to {best_fix} (or bump the direct parent / pin a transitive override)."
+    else:
+        fix = "Fix: upgrade the dependency (or bump the direct parent / pin a transitive override) to a non-vulnerable version."
+    return summary, fix
+
+
+def _pick_blocking_code(introduced_code_findings) -> tuple[str, str]:
+    """
+    Deterministic "aha" line for code:
+      - choose worst severity finding, then file, then line, then rule id
+      - include rule id + location
+      - include hint if present (already curated via rule metadata)
+    """
+    if not introduced_code_findings:
+        return "", ""
+
+    f0 = sorted(
+        introduced_code_findings,
+        key=lambda f: (
+            _sev_rank(getattr(f, "severity", None)),
+            str(getattr(f, "package", "") or ""),  # file path in your schema
+            str(getattr(f, "installed_version", "") or ""),  # line in your schema
+            str(getattr(f, "id", "") or ""),
+        ),
+    )[0]
+
+    sev = (getattr(f0, "severity", "") or "").strip().upper() or "UNKNOWN"
+    rule = (getattr(f0, "id", "") or "").strip()
+    file_path = (getattr(f0, "package", "") or "").strip()
+    line = (getattr(f0, "installed_version", "") or "").strip()
+
+    hint = (getattr(f0, "hint", "") or "").strip()
+    if not hint:
+        hint = "Review and refactor to remove this risky pattern."
+
+    summary = f"🟧 {sev} code: {rule} — {file_path}:{line}"
+    fix = f"Fix: {hint}"
+    return summary, fix
 
 
 def main() -> int:
@@ -111,7 +226,7 @@ def main() -> int:
     base_sha = ctx.base_sha or ""
     head_sha = ctx.head_sha or ""
 
-    # SBOM baseline is canonical for deps diff (avoid double-baseline overwrite bugs)
+    # SBOM baseline is canonical for deps diff
     sbom_baseline = introduced_packages_from_sbom_pr(base_sha, head_sha, repo_dir=workspace)
     changed_pkgs = sbom_baseline.changed
     node_baseline_status = sbom_baseline.status
@@ -145,7 +260,7 @@ def main() -> int:
     )
 
     # -------------------------
-    # 5) Counts ONLY (no recomputing "worst" here)
+    # 5) Introduced counts + AHA culprit
     # -------------------------
     introduced_cluster_set = set(classified["introduced"])
     introduced_dep_findings = [
@@ -159,7 +274,23 @@ def main() -> int:
     if len(introduced_semgrep_findings) > 0:
         introduced_sources.append("code")
 
-    # Notes: baseline line + canonical gate notes
+    blocking_summary = ""
+    blocking_fix = ""
+    if verdict != "go" and (overall_worst is not None):
+        ws = worst_sources or []
+        # Prefer deps if deps caused worst (ties include deps), else code
+        if "deps" in ws and introduced_dep_findings:
+            blocking_summary, blocking_fix = _pick_blocking_dep(introduced_dep_findings)
+        elif "code" in ws and introduced_semgrep_findings:
+            blocking_summary, blocking_fix = _pick_blocking_code(introduced_semgrep_findings)
+        else:
+            # fallback: pick whichever exists
+            if introduced_dep_findings:
+                blocking_summary, blocking_fix = _pick_blocking_dep(introduced_dep_findings)
+            elif introduced_semgrep_findings:
+                blocking_summary, blocking_fix = _pick_blocking_code(introduced_semgrep_findings)
+
+    # Notes: baseline line + canonical gate notes (decision block + Why must align)
     notes = [
         f"Baselines: node={node_baseline_status}, semgrep={semgrep_baseline.status}.",
         *gate_notes,
@@ -190,6 +321,10 @@ def main() -> int:
             "changed_pkgs_count": len(changed_pkgs),
             "introduced_clusters_list": classified["introduced"],
 
+            # AHA payload (decision block uses this; never recompute there)
+            "blocking_summary": blocking_summary,
+            "blocking_fix": blocking_fix,
+
             # baselines
             "node_baseline_status": node_baseline_status,
             "lockfile_diff_unavailable": diff_unavailable,
@@ -197,13 +332,13 @@ def main() -> int:
             "semgrep_introduced_count": len(introduced_semgrep_findings),
             "semgrep_preexisting_count": len(preexisting_semgrep_findings),
 
-            # direction (optional)
+            # direction
             "deps_direction": "↑" if len(classified["introduced"]) > 0 else "→",
             "code_direction": "↑" if len(introduced_semgrep_findings) > 0 else "→",
             "deps_preexisting_clusters": len(classified["preexisting"]),
             "code_preexisting_findings": len(preexisting_semgrep_findings),
 
-            # canonical introduced-risk fields
+            # canonical introduced-risk fields (from gate_verdict)
             "introduced_dep_advisories_count": introduced_dep_advisories_count,
             "introduced_code_findings_count": len(introduced_semgrep_findings),
             "introduced_dep_worst_severity": dep_worst,
