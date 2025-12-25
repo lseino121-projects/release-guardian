@@ -90,7 +90,7 @@ def _best_fix_version(raw: str | None) -> str | None:
 
 def _pick_blocking_dep(introduced_dep_findings) -> tuple[str, str]:
     """
-    Deterministic "aha" line for deps:
+    Deterministic "aha" line for deps (introduced):
       - choose worst severity finding, then pkg, then installed_version, then vuln id
       - include up to 3 advisory IDs
       - include best observed fix version if available
@@ -123,7 +123,6 @@ def _pick_blocking_dep(introduced_dep_findings) -> tuple[str, str]:
     )
     ids_str = ", ".join(ids[:3]) + ("…" if len(ids) > 3 else "")
 
-    # Pick best fix version observed for this pkg@ver across findings
     fix_candidates: list[str] = []
     for f in introduced_dep_findings:
         if (getattr(f, "package", "") or "").strip() != pkg:
@@ -145,10 +144,9 @@ def _pick_blocking_dep(introduced_dep_findings) -> tuple[str, str]:
 
 def _pick_blocking_code(introduced_code_findings) -> tuple[str, str]:
     """
-    Deterministic "aha" line for code:
+    Deterministic "aha" line for code (introduced):
       - choose worst severity finding, then file, then line, then rule id
-      - include rule id + location
-      - include hint if present (already curated via rule metadata)
+      - include hint if present
     """
     if not introduced_code_findings:
         return "", ""
@@ -157,7 +155,7 @@ def _pick_blocking_code(introduced_code_findings) -> tuple[str, str]:
         introduced_code_findings,
         key=lambda f: (
             _sev_rank(getattr(f, "severity", None)),
-            str(getattr(f, "package", "") or ""),  # file path in your schema
+            str(getattr(f, "package", "") or ""),          # file path in your schema
             str(getattr(f, "installed_version", "") or ""),  # line in your schema
             str(getattr(f, "id", "") or ""),
         ),
@@ -175,6 +173,24 @@ def _pick_blocking_code(introduced_code_findings) -> tuple[str, str]:
     summary = f"🟧 {sev} code: {rule} — {file_path}:{line}"
     fix = f"Fix: {hint}"
     return summary, fix
+
+
+def _pick_head_worst_dep(unified: dict) -> tuple[str, str, str, list[str]]:
+    """
+    Pick the single loudest dependency vuln on HEAD snapshot (introduced or pre-existing),
+    using unified_summary rows (already deduped/clumped).
+    Returns (sev, pkg, ver, advisories)
+    """
+    rows = unified.get("unified_top") or []
+    if not rows:
+        return "", "", "", []
+    r0 = rows[0]
+    sev = (r0.get("worst_severity") or "").lower().strip()
+    pkg = (r0.get("package") or "").strip()
+    ver = (r0.get("installed_version") or "").strip()
+    advs = r0.get("advisories") or []
+    advs = [a for a in advs if isinstance(a, str) and a.strip()]
+    return sev, pkg, ver, advs
 
 
 def main() -> int:
@@ -226,7 +242,6 @@ def main() -> int:
     base_sha = ctx.base_sha or ""
     head_sha = ctx.head_sha or ""
 
-    # SBOM baseline is canonical for deps diff
     sbom_baseline = introduced_packages_from_sbom_pr(base_sha, head_sha, repo_dir=workspace)
     changed_pkgs = sbom_baseline.changed
     node_baseline_status = sbom_baseline.status
@@ -260,7 +275,7 @@ def main() -> int:
     )
 
     # -------------------------
-    # 5) Introduced counts + AHA culprit
+    # 5) Introduced counts + AHA (blocking introduced + loud head pre-existing)
     # -------------------------
     introduced_cluster_set = set(classified["introduced"])
     introduced_dep_findings = [
@@ -274,23 +289,39 @@ def main() -> int:
     if len(introduced_semgrep_findings) > 0:
         introduced_sources.append("code")
 
+    # Blocking (introduced) AHA payload
     blocking_summary = ""
     blocking_fix = ""
-    if verdict != "go" and (overall_worst is not None):
+    if verdict != "go" and overall_worst is not None:
         ws = worst_sources or []
-        # Prefer deps if deps caused worst (ties include deps), else code
         if "deps" in ws and introduced_dep_findings:
             blocking_summary, blocking_fix = _pick_blocking_dep(introduced_dep_findings)
         elif "code" in ws and introduced_semgrep_findings:
             blocking_summary, blocking_fix = _pick_blocking_code(introduced_semgrep_findings)
         else:
-            # fallback: pick whichever exists
             if introduced_dep_findings:
                 blocking_summary, blocking_fix = _pick_blocking_dep(introduced_dep_findings)
             elif introduced_semgrep_findings:
                 blocking_summary, blocking_fix = _pick_blocking_code(introduced_semgrep_findings)
 
-    # Notes: baseline line + canonical gate notes (decision block + Why must align)
+    # Loudest dependency vuln on HEAD snapshot (may be pre-existing)
+    head_dep_sev, head_dep_pkg, head_dep_ver, head_dep_advs = _pick_head_worst_dep(unified)
+    head_dep_is_introduced = bool(head_dep_pkg and (head_dep_pkg, head_dep_ver) in introduced_cluster_set)
+    head_dep_summary = ""
+    if head_dep_pkg and head_dep_ver and head_dep_sev:
+        badge = "🟥" if head_dep_sev == "critical" else ("🟧" if head_dep_sev == "high" else ("🟨" if head_dep_sev == "medium" else "🟦"))
+        advs_str = ", ".join(head_dep_advs[:3]) + ("…" if len(head_dep_advs) > 3 else "")
+        head_dep_summary = f"{badge} {head_dep_sev.upper()} deps on HEAD: {head_dep_pkg}@{head_dep_ver}" + (f" — {advs_str}" if advs_str else "")
+
+    # Only show head pre-existing callout if it’s (a) pre-existing and (b) worse than introduced overall worst
+    show_head_preexisting = False
+    if head_dep_summary and not head_dep_is_introduced:
+        # Compare severities: if HEAD deps worst outranks introduced worst, surface it.
+        introduced_rank = _sev_rank(overall_worst) if overall_worst else 99
+        head_rank = _sev_rank(head_dep_sev)
+        show_head_preexisting = head_rank < introduced_rank
+
+    # Notes: baseline line + canonical gate notes
     notes = [
         f"Baselines: node={node_baseline_status}, semgrep={semgrep_baseline.status}.",
         *gate_notes,
@@ -321,9 +352,14 @@ def main() -> int:
             "changed_pkgs_count": len(changed_pkgs),
             "introduced_clusters_list": classified["introduced"],
 
-            # AHA payload (decision block uses this; never recompute there)
+            # AHA payloads
             "blocking_summary": blocking_summary,
             "blocking_fix": blocking_fix,
+
+            # Head snapshot loud deps (pre-existing callout)
+            "head_deps_worst_summary": head_dep_summary,
+            "head_deps_worst_is_introduced": head_dep_is_introduced,
+            "head_deps_worst_show_preexisting": show_head_preexisting,
 
             # baselines
             "node_baseline_status": node_baseline_status,
@@ -344,8 +380,8 @@ def main() -> int:
             "introduced_dep_worst_severity": dep_worst,
             "introduced_code_worst_severity": code_worst,
             "introduced_worst_severity": overall_worst,
-            "introduced_worst_sources": worst_sources,  # what CAUSED the worst severity
-            "introduced_sources": introduced_sources,    # what was introduced at all
+            "introduced_worst_sources": worst_sources,
+            "introduced_sources": introduced_sources,
 
             "severity_threshold": args.severity_threshold,
             "baseline_confidence": baseline_confidence(node_baseline_status, semgrep_baseline.status),

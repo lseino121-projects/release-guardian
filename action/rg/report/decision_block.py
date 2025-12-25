@@ -62,9 +62,13 @@ def render_decision_block(report: RDIReport) -> str:
             else f"Introduced risk meets/exceeds threshold ({threshold})."
         )
 
-    # ✅ AHA: blocking culprit + fix (computed in main; never recompute here)
+    # AHA: blocking introduced culprit + fix (computed in main)
     blocking_summary = (ctx.get("blocking_summary") or "").strip()
     blocking_fix = (ctx.get("blocking_fix") or "").strip()
+
+    # AHA: loudest pre-existing deps on HEAD (informational)
+    head_dep_summary = (ctx.get("head_deps_worst_summary") or "").strip()
+    show_head_preexisting = bool(ctx.get("head_deps_worst_show_preexisting", False))
 
     lines = [header, ""]
 
@@ -72,6 +76,12 @@ def render_decision_block(report: RDIReport) -> str:
         lines.append(blocking_summary)
         if blocking_fix:
             lines.append(blocking_fix)
+        lines.append("")
+
+    # This is the missing “minimist” visibility:
+    # show it when it's worse than the introduced blocker, and pre-existing.
+    if show_head_preexisting and head_dep_summary:
+        lines.append(f"(Pre-existing on HEAD; not gating) {head_dep_summary}")
         lines.append("")
 
     lines += [
