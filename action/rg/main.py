@@ -1,3 +1,4 @@
+# main.py
 from __future__ import annotations
 
 import argparse
@@ -19,12 +20,189 @@ from rg.normalize.grype_norm import normalize_grype
 from rg.scanners.semgrep import run_semgrep
 from rg.normalize.semgrep_norm import normalize_semgrep
 
-from rg.rdi.introduced_node import introduced_packages_from_pr
 from rg.rdi.introduced_semgrep import introduced_semgrep_from_pr
 from rg.rdi.policy_v1 import classify_clusters, gate_verdict
 
 from rg.report.pr_comment import render_pr_comment_md
 from rg.rdi.introduced_sbom import introduced_packages_from_sbom_pr
+
+
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _sev_rank(sev: str | None) -> int:
+    return _SEV_RANK.get((sev or "").lower().strip(), 99)
+
+
+def _baseline_penalty(status: str) -> int:
+    """
+    Must match policy_v1 philosophy so Confidence never disagrees with the score penalty model.
+    """
+    s = (status or "").upper().strip()
+
+    if s == "OK":
+        return 0
+
+    # Lockfile introduced in this PR. Expected, still deterministic; do not penalize confidence.
+    if s == "BASE_MISSING":
+        return 0
+
+    # Real confidence problems
+    if s in ("REF_UNAVAILABLE", "SCAN_FAILED"):
+        return 15
+
+    # Unknown statuses → medium penalty
+    return 8
+
+
+def baseline_confidence(node_status: str, semgrep_status: str) -> str:
+    pen = _baseline_penalty(node_status) + _baseline_penalty(semgrep_status)
+    return "HIGH" if pen == 0 else ("MED" if pen <= 6 else "LOW")
+
+
+def _unique_ids(findings_list) -> int:
+    ids = set()
+    for f in findings_list or []:
+        fid = (getattr(f, "id", None) or "").strip()
+        if fid:
+            ids.add(fid)
+    return len(ids)
+
+
+def _best_fix_version(raw: str | None) -> str | None:
+    """
+    Trivy sometimes returns "1.2.6, 0.2.4" etc. Grype may be empty.
+    v1 heuristic: first token that looks like a version (starts with digit).
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        return None
+    for p in parts:
+        if p and p[0].isdigit():
+            return p
+    return parts[0] or None
+
+
+def _pick_blocking_dep(introduced_dep_findings) -> tuple[str, str]:
+    """
+    Deterministic "aha" line for deps (introduced):
+      - choose worst severity finding, then pkg, then installed_version, then vuln id
+      - include up to 3 advisory IDs
+      - include best observed fix version if available
+    """
+    if not introduced_dep_findings:
+        return "", ""
+
+    f0 = sorted(
+        introduced_dep_findings,
+        key=lambda f: (
+            _sev_rank(getattr(f, "severity", None)),
+            str(getattr(f, "package", "") or ""),
+            str(getattr(f, "installed_version", "") or ""),
+            str(getattr(f, "id", "") or ""),
+        ),
+    )[0]
+
+    pkg = (getattr(f0, "package", "") or "").strip()
+    ver = (getattr(f0, "installed_version", "") or "").strip()
+    sev = (getattr(f0, "severity", "") or "").strip().upper() or "UNKNOWN"
+
+    ids = sorted(
+        {
+            (getattr(f, "id", "") or "").strip()
+            for f in introduced_dep_findings
+            if (getattr(f, "package", "") or "").strip() == pkg
+            and (getattr(f, "installed_version", "") or "").strip() == ver
+            and (getattr(f, "id", "") or "").strip()
+        }
+    )
+    ids_str = ", ".join(ids[:3]) + ("…" if len(ids) > 3 else "")
+
+    fix_candidates: list[str] = []
+    for f in introduced_dep_findings:
+        if (getattr(f, "package", "") or "").strip() != pkg:
+            continue
+        if (getattr(f, "installed_version", "") or "").strip() != ver:
+            continue
+        fx = _best_fix_version(getattr(f, "fixed_version", None))
+        if fx and fx not in fix_candidates:
+            fix_candidates.append(fx)
+    best_fix = fix_candidates[0] if fix_candidates else None
+
+    summary = f"🟥 {sev} deps: {pkg}@{ver}" + (f" — {ids_str}" if ids_str else "")
+    if best_fix:
+        fix = f"Upgrade {pkg} to {best_fix} (or bump the direct parent / pin a transitive override)."
+    else:
+        fix = "Upgrade the dependency (or bump the direct parent / pin a transitive override) to a non-vulnerable version."
+    return summary, fix
+
+
+def _pick_blocking_code(introduced_code_findings) -> tuple[str, str]:
+    """
+    Deterministic "aha" line for code (introduced):
+      - choose worst severity finding, then file, then line, then rule id
+      - include hint if present
+    """
+    if not introduced_code_findings:
+        return "", ""
+
+    f0 = sorted(
+        introduced_code_findings,
+        key=lambda f: (
+            _sev_rank(getattr(f, "severity", None)),
+            str(getattr(f, "package", "") or ""),            # file path in your schema
+            str(getattr(f, "installed_version", "") or ""),  # line in your schema
+            str(getattr(f, "id", "") or ""),
+        ),
+    )[0]
+
+    sev = (getattr(f0, "severity", "") or "").strip().upper() or "UNKNOWN"
+    rule = (getattr(f0, "id", "") or "").strip()
+    file_path = (getattr(f0, "package", "") or "").strip()
+    line = (getattr(f0, "installed_version", "") or "").strip()
+
+    hint = (getattr(f0, "hint", "") or "").strip() or "Review and refactor to remove this risky pattern."
+
+    summary = f"🟧 {sev} code: {rule} — {file_path}:{line}"
+    fix = hint
+    return summary, fix
+
+
+def _pick_head_worst_dep(unified: dict) -> tuple[str, str, str, list[str]]:
+    """
+    Pick the single loudest dependency vuln on HEAD snapshot (introduced or pre-existing),
+    using unified_summary rows (already deduped/clumped).
+    Returns (sev, pkg, ver, advisories)
+    """
+    rows = unified.get("unified_top") or []
+    if not rows:
+        return "", "", "", []
+    r0 = rows[0]
+    sev = (r0.get("worst_severity") or "").lower().strip()
+    pkg = (r0.get("package") or "").strip()
+    ver = (r0.get("installed_version") or "").strip()
+    advs = r0.get("advisories") or []
+    advs = [a for a in advs if isinstance(a, str) and a.strip()]
+    return sev, pkg, ver, advs
+
+
+def _badge_for_sev(sev: str) -> str:
+    s = (sev or "").lower().strip()
+    if s == "critical":
+        return "🟥"
+    if s == "high":
+        return "🟧"
+    if s == "medium":
+        return "🟨"
+    if s == "low":
+        return "🟦"
+    return "⬜️"
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -42,10 +220,10 @@ def main() -> int:
 
     workspace = "/github/workspace"
     out_dir = f"{workspace}/.rg/out"
-    semgrep_config = "action/rg/rules"  # local deterministic rules inside repo
+    semgrep_config = "action/rg/rules"  # repo-local deterministic rules
 
     # -------------------------
-    # 1) Dependency scanners (v1 gating scope)
+    # 1) Dependency scanners
     # -------------------------
     trivy_path = run_trivy_fs(workspace=workspace, out_dir=out_dir, timeout=600)
     trivy_findings = normalize_trivy(str(trivy_path))
@@ -59,7 +237,7 @@ def main() -> int:
     unified = unified_summary(deps_findings)
 
     # -------------------------
-    # 2) Semgrep (head scan for reporting table)
+    # 2) Semgrep head scan (for HEAD snapshot table)
     # -------------------------
     semgrep_path = run_semgrep(
         workspace=workspace,
@@ -70,39 +248,33 @@ def main() -> int:
     semgrep_findings = normalize_semgrep(str(semgrep_path))
 
     # -------------------------
-    # 3) Introduced vs pre-existing baselines
+    # 3) Baselines: introduced vs preexisting
     # -------------------------
     base_sha = ctx.base_sha or ""
     head_sha = ctx.head_sha or ""
 
-    # Node baseline (for introduced deps)
-    node_baseline = introduced_packages_from_pr(base_sha, head_sha, repo_dir=workspace)
-    changed_pkgs = node_baseline.changed
-    node_baseline_status = node_baseline.status
+    sbom_baseline = introduced_packages_from_sbom_pr(base_sha, head_sha, repo_dir=workspace)
+    changed_pkgs = sbom_baseline.changed
+    node_baseline_status = sbom_baseline.status
     diff_unavailable = node_baseline_status != "OK"
 
     classified = classify_clusters(deps_findings, changed_pkgs)
 
-    # Semgrep baseline (introduced SAST)
     semgrep_baseline = introduced_semgrep_from_pr(
         base_ref=base_sha,
         head_ref=head_sha,
         repo_dir=workspace,
         config=semgrep_config,
         timeout=900,
+        excludes=["unsafe", "examples/unsafe"],
     )
     introduced_semgrep_findings = semgrep_baseline.introduced
-    preexisting_semgrep_findings = semgrep_baseline.preexisting  # not required yet, but useful later
-
-    sbom_baseline = introduced_packages_from_sbom_pr(base_sha, head_sha, repo_dir=workspace)
-    changed_pkgs = sbom_baseline.changed
-    node_baseline_status = sbom_baseline.status  # reuse existing field name for now if you want
-    diff_unavailable = sbom_baseline.status != "OK"
+    preexisting_semgrep_findings = semgrep_baseline.preexisting
 
     # -------------------------
-    # 4) Gating (introduced-only, deps + semgrep)
+    # 4) Gating (single source of truth)
     # -------------------------
-    verdict, score, gate_notes = gate_verdict(
+    verdict, score, gate_notes, worst_sources, dep_worst, code_worst, overall_worst = gate_verdict(
         mode=args.mode,
         threshold=args.severity_threshold,
         allow_conditional=args.allow_conditional,
@@ -113,58 +285,70 @@ def main() -> int:
         semgrep_baseline_status=semgrep_baseline.status,
     )
 
-
     # -------------------------
-    # 5) Introduced Risk summary (single narrative payload)
+    # 5) Introduced counts + AHA
     # -------------------------
-    SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-
-    def _rank(sev: str | None) -> int:
-        return SEV_RANK.get((sev or "").lower(), 99)
-
-    def _worst(findings_list) -> str | None:
-        worst_sev: str | None = None
-        for f in findings_list:
-            if worst_sev is None or _rank(getattr(f, "severity", None)) < _rank(worst_sev):
-                worst_sev = getattr(f, "severity", None)
-        return worst_sev
-
     introduced_cluster_set = set(classified["introduced"])
     introduced_dep_findings = [
         f for f in deps_findings if (f.package, f.installed_version) in introduced_cluster_set
     ]
-    introduced_dep_worst = _worst(introduced_dep_findings)
-    introduced_code_worst = _worst(introduced_semgrep_findings)
+    introduced_dep_advisories_count = _unique_ids(introduced_dep_findings)
 
-    introduced_any = bool(introduced_dep_findings) or bool(introduced_semgrep_findings)
     introduced_sources: list[str] = []
-    if introduced_dep_findings:
+    if introduced_dep_advisories_count > 0:
         introduced_sources.append("deps")
-    if introduced_semgrep_findings:
+    if len(introduced_semgrep_findings) > 0:
         introduced_sources.append("code")
 
-    # overall worst across deps+code
-    introduced_overall_worst: str | None = None
-    for sev in [introduced_dep_worst, introduced_code_worst]:
-        if sev and (introduced_overall_worst is None or _rank(sev) < _rank(introduced_overall_worst)):
-            introduced_overall_worst = sev
+    # Blocking (introduced) AHA payload
+    blocking_summary = ""
+    blocking_fix = ""
+    if verdict != "go" and overall_worst is not None:
+        ws = worst_sources or []
+        if "deps" in ws and introduced_dep_findings:
+            blocking_summary, blocking_fix = _pick_blocking_dep(introduced_dep_findings)
+        elif "code" in ws and introduced_semgrep_findings:
+            blocking_summary, blocking_fix = _pick_blocking_code(introduced_semgrep_findings)
+        else:
+            # fallback if worst_sources is empty
+            if introduced_dep_findings:
+                blocking_summary, blocking_fix = _pick_blocking_dep(introduced_dep_findings)
+            elif introduced_semgrep_findings:
+                blocking_summary, blocking_fix = _pick_blocking_code(introduced_semgrep_findings)
 
-    # -------------------------
-    # 6) Notes ("Why") — tie to vision
-    # -------------------------
-    # Keep these tight; the comment renderer takes the first N lines.
+    # Loudest dependency vuln on HEAD snapshot (may be pre-existing)
+    head_dep_sev, head_dep_pkg, head_dep_ver, head_dep_advs = _pick_head_worst_dep(unified)
+    head_dep_is_introduced = bool(head_dep_pkg and (head_dep_pkg, head_dep_ver) in introduced_cluster_set)
+
+    head_dep_summary = ""
+    if head_dep_pkg and head_dep_ver and head_dep_sev:
+        badge = _badge_for_sev(head_dep_sev)
+        advs_str = ", ".join(head_dep_advs[:3]) + ("…" if len(head_dep_advs) > 3 else "")
+        head_dep_summary = f"{badge} {head_dep_sev.upper()} deps on HEAD: {head_dep_pkg}@{head_dep_ver}" + (
+            f" — {advs_str}" if advs_str else ""
+        )
+
+    # Only show pre-existing HEAD callout if it's (a) pre-existing and (b) worse than introduced overall worst
+    show_head_preexisting = False
+    if head_dep_summary and not head_dep_is_introduced:
+        introduced_rank = _sev_rank(overall_worst) if overall_worst else 99
+        head_rank = _sev_rank(head_dep_sev)
+        show_head_preexisting = head_rank < introduced_rank
+
+    # This is what decision_block.py expects:
+    head_preexisting_dep_summary = ""
+    if show_head_preexisting and head_dep_summary:
+        head_preexisting_dep_summary = f"(Pre-existing on HEAD; not gating) {head_dep_summary}"
+
+    # Notes: baseline line + canonical gate notes
     notes = [
-        # Baseline health (short, factual)
         f"Baselines: node={node_baseline_status}, semgrep={semgrep_baseline.status}.",
-
-        # Decision narrative (single source of truth)
         *gate_notes,
     ]
-
-    # Optional debug-ish note (only when baseline is not OK)
     if diff_unavailable:
         notes.append(
-            "Node baseline not OK (e.g., BASE_MISSING means lockfile introduced; expected). REF_UNAVAILABLE means the SHAs weren’t fetchable."
+            "Dependency baseline not OK (e.g., BASE_MISSING means lockfile introduced; expected). "
+            "REF_UNAVAILABLE means the SHAs weren’t fetchable."
         )
 
     summary = f"{verdict.upper()} (RDI {score}) — v1 scaffold"
@@ -181,29 +365,52 @@ def main() -> int:
             "base_sha": ctx.base_sha,
             "head_sha": ctx.head_sha,
 
-            # existing counters
+            # deps diff classification
             "introduced_clusters": len(classified["introduced"]),
             "preexisting_clusters": len(classified["preexisting"]),
             "changed_pkgs_count": len(changed_pkgs),
             "introduced_clusters_list": classified["introduced"],
 
-            # baseline metadata
+            # AHA payloads (introduced blocker)
+            "blocking_summary": blocking_summary,
+            "blocking_fix": blocking_fix,
+
+            # Pre-existing HEAD deps callout (for top block)
+            "head_preexisting_dep_summary": head_preexisting_dep_summary,
+
+            # (optional) keep raw head data around if you want it later
+            "head_deps_worst_summary": head_dep_summary,
+            "head_deps_worst_is_introduced": head_dep_is_introduced,
+            "head_deps_worst_show_preexisting": show_head_preexisting,
+
+            # baselines
             "node_baseline_status": node_baseline_status,
             "lockfile_diff_unavailable": diff_unavailable,
             "semgrep_baseline_status": semgrep_baseline.status,
             "semgrep_introduced_count": len(introduced_semgrep_findings),
             "semgrep_preexisting_count": len(preexisting_semgrep_findings),
 
-            # NEW: introduced-risk “policy plumbing” fields
-            "introduced_dep_advisories_count": len(introduced_dep_findings),
+            # direction (optional)
+            "deps_direction": "↑" if len(classified["introduced"]) > 0 else "→",
+            "code_direction": "↑" if len(introduced_semgrep_findings) > 0 else "→",
+            "deps_preexisting_clusters": len(classified["preexisting"]),
+            "code_preexisting_findings": len(preexisting_semgrep_findings),
+
+            # canonical introduced-risk fields (from gate_verdict)
+            "introduced_dep_advisories_count": introduced_dep_advisories_count,
             "introduced_code_findings_count": len(introduced_semgrep_findings),
-            "introduced_worst_severity": introduced_overall_worst,
-            "introduced_sources": introduced_sources,  # ["deps", "code"]
+            "introduced_dep_worst_severity": dep_worst,
+            "introduced_code_worst_severity": code_worst,
+            "introduced_worst_severity": overall_worst,
+            "introduced_worst_sources": worst_sources,
+            "introduced_sources": introduced_sources,
+
+            "severity_threshold": args.severity_threshold,
+            "baseline_confidence": baseline_confidence(node_baseline_status, semgrep_baseline.status),
         },
-        notes=notes[:10],  # keep it crisp; pr_comment uses first ~6 anyway
+        notes=notes[:10],
         top_findings=unified.get("unified_top", [])[:10],
     )
-
 
     Path(args.out_json).write_text(json.dumps(report.to_dict(), indent=2))
     Path(args.out_md).write_text(

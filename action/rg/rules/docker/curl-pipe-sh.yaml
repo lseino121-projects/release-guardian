@@ -1,6 +1,11 @@
 rules:
-  - id: rg.docker.curl-pipe-sh
+  - id: action.rg.rules.docker.rg.docker.curl-pipe-sh
     languages: [dockerfile]
-    message: "Avoid piping curl to shell (curl | sh). Pin checksums and verify signatures."
+    message: "Avoid piping curl/wget to a shell. Download, verify checksum/signature, then execute."
     severity: ERROR
-    pattern: "curl ... | sh"
+    pattern-regex: '(?i)\b(curl|wget)\b[^|]*(\|\s*(sh|bash)\b)'
+    metadata:
+      category: security
+      technology: [dockerfile]
+      rg:
+        hint: "Don’t do curl|sh. Download, verify (checksum/signature), then run."

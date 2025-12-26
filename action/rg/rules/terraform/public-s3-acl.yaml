@@ -1,8 +1,36 @@
 rules:
-  - id: rg.tf.s3-public-acl
+  - id: action.rg.rules.terraform.rg.tf.s3-public-acl
     languages: [terraform]
-    message: "S3 bucket ACL is public. Avoid public-read/public-read-write."
+    message: "S3 bucket ACL is public. Avoid public-read/public-read-write; prefer private + Block Public Access."
     severity: ERROR
-    pattern-either:
-      - pattern: acl = "public-read"
-      - pattern: acl = "public-read-write"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              resource "aws_s3_bucket" $NAME {
+                ...
+                acl = "public-read"
+                ...
+              }
+          - pattern: |
+              resource "aws_s3_bucket" $NAME {
+                ...
+                acl = "public-read-write"
+                ...
+              }
+          - pattern: |
+              resource "aws_s3_bucket_acl" $NAME {
+                ...
+                acl = "public-read"
+                ...
+              }
+          - pattern: |
+              resource "aws_s3_bucket_acl" $NAME {
+                ...
+                acl = "public-read-write"
+                ...
+              }
+    metadata:
+      category: security
+      technology: [terraform]
+      rg:
+        hint: "Use private ACL and enable Block Public Access. If you must expose content, prefer CloudFront + OAC/OAI or a tightly-scoped bucket policy."

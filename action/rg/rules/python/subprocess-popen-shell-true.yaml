@@ -6,7 +6,5 @@ rules:
     patterns:
       - pattern: subprocess.Popen(..., shell=True, ...)
     metadata:
-      category: security
-      confidence: HIGH
-      likelihood: HIGH
-      impact: HIGH
+      rg:
+        hint: "Avoid shell=True. Use subprocess.run([...], shell=False) and validate inputs."

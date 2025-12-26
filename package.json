@@ -1,7 +1,11 @@
 {
   "name": "release-guardian",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "**Release Guardian** is a decision engine for pull requests.",
+  "main": "bad.js",
+  "directories": {
+    "example": "examples"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -16,7 +20,6 @@
     "url": "https://github.com/lseino121-projects/release-guardian/issues"
   },
   "homepage": "https://github.com/lseino121-projects/release-guardian#readme",
-  "description": "",
   "dependencies": {
     "minimist": "^0.0.8"
   }

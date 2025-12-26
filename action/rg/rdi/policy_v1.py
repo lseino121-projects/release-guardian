@@ -136,7 +136,6 @@ def _baseline_penalty(status: str) -> int:
     # Unknown -> treat as medium confidence problem (not as bad as a hard failure)
     return 8
 
-
 def gate_verdict(
     mode: str,
     threshold: str,
@@ -146,13 +145,14 @@ def gate_verdict(
     introduced_semgrep_findings: Optional[List[Finding]] = None,
     node_baseline_status: str = "OK",
     semgrep_baseline_status: str = "OK",
-) -> tuple[str, int, list[str]]:
+) -> tuple[str, int, list[str], list[str], str | None, str | None, str | None]:
     """
     v1 gating:
       - Only introduced deps clusters can block (Trivy/Grype normalized -> clusters).
       - Introduced Semgrep findings can block.
       - threshold applies consistently across sources.
       - RDI score derived from introduced worst severity (0-100, higher=safer).
+      - Returns canonical "worst_sources" so decision block + Why never disagree.
     """
     allow_conditional_bool = str(allow_conditional).lower() in ("1", "true", "yes", "y")
     thr_rank = _rank(threshold)
@@ -178,17 +178,26 @@ def gate_verdict(
     introduced_overall_worst = _worst_of(dep_worst, semgrep_worst)
 
     dep_clusters_ct = len(introduced_clusters)
-    dep_advisories_ct = len({f.id for f in introduced_dep_findings})
+    dep_advisories_ct = len({(f.id or "").strip() for f in introduced_dep_findings if (f.id or "").strip()})
     code_ct = len(introduced_semgrep_findings)
 
+    # "introduced_sources" = anything introduced at all
     introduced_sources: list[str] = []
     if dep_advisories_ct > 0:
         introduced_sources.append("deps")
     if code_ct > 0:
         introduced_sources.append("code")
 
+    # "worst_sources" = what CAUSED the worst severity
+    worst_sources: list[str] = []
+    if introduced_overall_worst:
+        if dep_worst == introduced_overall_worst:
+            worst_sources.append("deps")
+        if semgrep_worst == introduced_overall_worst:
+            worst_sources.append("code")
+
     # -------------------------
-    # Score + baseline confidence
+    # Score + baseline penalty (compute BEFORE any returns)
     # -------------------------
     score = _rdi_score_from_introduced(
         worst=introduced_overall_worst,
@@ -199,27 +208,35 @@ def gate_verdict(
     pen = _baseline_penalty(node_baseline_status) + _baseline_penalty(semgrep_baseline_status)
     score = max(0, min(100, score - pen))
 
-    confidence = "HIGH" if pen == 0 else ("MED" if pen <= 6 else "LOW")
-    suffix = (
-        ""
-        if confidence == "HIGH"
-        else f" — baseline confidence {confidence} (node={node_baseline_status}, semgrep={semgrep_baseline_status})"
+    # -------------------------
+    # Notes: canonical narrative (decision block should mirror these fields)
+    # -------------------------
+    notes: list[str] = []
+    worst_str = (introduced_overall_worst or "none").upper()
+    worst_src_str = ", ".join(worst_sources) if worst_sources else "none"
+    introduced_str = ", ".join(introduced_sources) if introduced_sources else "none"
+
+    notes.append(
+        f"Introduced risk: deps={dep_clusters_ct} clusters/{dep_advisories_ct} advisories, "
+        f"code={code_ct} findings. Worst={worst_str} (worst source: {worst_src_str}; introduced: {introduced_str})."
     )
 
     # -------------------------
-    # Notes: 1 narrative + 1 decision line
+    # Decision logic
     # -------------------------
-    notes: list[str] = []
-    notes.append(
-        f"Introduced risk: deps={dep_clusters_ct} clusters/{dep_advisories_ct} advisories, code={code_ct} findings. "
-        f"Worst={(introduced_overall_worst or 'none').upper()} "
-        f"(sources: {', '.join(introduced_sources) if introduced_sources else 'none'})."
-    )
 
     # Nothing introduced anywhere -> GO
     if dep_advisories_ct == 0 and code_ct == 0:
-        decision = f"No introduced vulnerabilities or code findings detected.{suffix}"
-        return "go", score, notes + [decision]
+        decision = "No introduced risk detected."
+        return (
+            "go",
+            score,
+            notes + [decision],
+            worst_sources,
+            dep_worst,
+            semgrep_worst,
+            introduced_overall_worst,
+        )
 
     # Determine if either source meets/exceeds threshold
     dep_meets = dep_worst is not None and _rank(dep_worst) <= thr_rank
@@ -228,14 +245,38 @@ def gate_verdict(
 
     # Not enforce -> always conditional when anything introduced exists
     if mode != "enforce":
-        decision = f"Mode is not enforce; reporting only.{suffix}"
-        return "conditional", score, notes + [decision]
+        decision = "Mode is not enforce; reporting only."
+        return (
+            "conditional",
+            score,
+            notes + [decision],
+            worst_sources,
+            dep_worst,
+            semgrep_worst,
+            introduced_overall_worst,
+        )
 
     # Enforce mode decision
     if meets:
-        decision = f"Introduced risk meets/exceeds threshold ({threshold.upper()}).{suffix}"
+        decision = f"Introduced risk meets/exceeds threshold ({threshold.upper()})."
         verdict = "conditional" if allow_conditional_bool else "no-go"
-        return verdict, score, notes + [decision]
+        return (
+            verdict,
+            score,
+            notes + [decision],
+            worst_sources,
+            dep_worst,
+            semgrep_worst,
+            introduced_overall_worst,
+        )
 
-    decision = f"Introduced risk is below threshold ({threshold.upper()}).{suffix}"
-    return "go", score, notes + [decision]
+    decision = f"Introduced risk is below threshold ({threshold.upper()})."
+    return (
+        "go",
+        score,
+        notes + [decision],
+        worst_sources,
+        dep_worst,
+        semgrep_worst,
+        introduced_overall_worst,
+    )
