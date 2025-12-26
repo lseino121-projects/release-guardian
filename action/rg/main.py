@@ -31,7 +31,7 @@ _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
 def _sev_rank(sev: str | None) -> int:
-    return _SEV_RANK.get((sev or "").lower(), 99)
+    return _SEV_RANK.get((sev or "").lower().strip(), 99)
 
 
 def _baseline_penalty(status: str) -> int:
@@ -136,9 +136,9 @@ def _pick_blocking_dep(introduced_dep_findings) -> tuple[str, str]:
 
     summary = f"🟥 {sev} deps: {pkg}@{ver}" + (f" — {ids_str}" if ids_str else "")
     if best_fix:
-        fix = f"Fix: upgrade {pkg} to {best_fix} (or bump the direct parent / pin a transitive override)."
+        fix = f"Upgrade {pkg} to {best_fix} (or bump the direct parent / pin a transitive override)."
     else:
-        fix = "Fix: upgrade the dependency (or bump the direct parent / pin a transitive override) to a non-vulnerable version."
+        fix = "Upgrade the dependency (or bump the direct parent / pin a transitive override) to a non-vulnerable version."
     return summary, fix
 
 
@@ -155,7 +155,7 @@ def _pick_blocking_code(introduced_code_findings) -> tuple[str, str]:
         introduced_code_findings,
         key=lambda f: (
             _sev_rank(getattr(f, "severity", None)),
-            str(getattr(f, "package", "") or ""),          # file path in your schema
+            str(getattr(f, "package", "") or ""),            # file path in your schema
             str(getattr(f, "installed_version", "") or ""),  # line in your schema
             str(getattr(f, "id", "") or ""),
         ),
@@ -166,12 +166,10 @@ def _pick_blocking_code(introduced_code_findings) -> tuple[str, str]:
     file_path = (getattr(f0, "package", "") or "").strip()
     line = (getattr(f0, "installed_version", "") or "").strip()
 
-    hint = (getattr(f0, "hint", "") or "").strip()
-    if not hint:
-        hint = "Review and refactor to remove this risky pattern."
+    hint = (getattr(f0, "hint", "") or "").strip() or "Review and refactor to remove this risky pattern."
 
     summary = f"🟧 {sev} code: {rule} — {file_path}:{line}"
-    fix = f"Fix: {hint}"
+    fix = hint
     return summary, fix
 
 
@@ -191,6 +189,19 @@ def _pick_head_worst_dep(unified: dict) -> tuple[str, str, str, list[str]]:
     advs = r0.get("advisories") or []
     advs = [a for a in advs if isinstance(a, str) and a.strip()]
     return sev, pkg, ver, advs
+
+
+def _badge_for_sev(sev: str) -> str:
+    s = (sev or "").lower().strip()
+    if s == "critical":
+        return "🟥"
+    if s == "high":
+        return "🟧"
+    if s == "medium":
+        return "🟨"
+    if s == "low":
+        return "🟦"
+    return "⬜️"
 
 
 def main() -> int:
@@ -275,7 +286,7 @@ def main() -> int:
     )
 
     # -------------------------
-    # 5) Introduced counts + AHA (blocking introduced + loud head pre-existing)
+    # 5) Introduced counts + AHA
     # -------------------------
     introduced_cluster_set = set(classified["introduced"])
     introduced_dep_findings = [
@@ -299,6 +310,7 @@ def main() -> int:
         elif "code" in ws and introduced_semgrep_findings:
             blocking_summary, blocking_fix = _pick_blocking_code(introduced_semgrep_findings)
         else:
+            # fallback if worst_sources is empty
             if introduced_dep_findings:
                 blocking_summary, blocking_fix = _pick_blocking_dep(introduced_dep_findings)
             elif introduced_semgrep_findings:
@@ -307,19 +319,26 @@ def main() -> int:
     # Loudest dependency vuln on HEAD snapshot (may be pre-existing)
     head_dep_sev, head_dep_pkg, head_dep_ver, head_dep_advs = _pick_head_worst_dep(unified)
     head_dep_is_introduced = bool(head_dep_pkg and (head_dep_pkg, head_dep_ver) in introduced_cluster_set)
+
     head_dep_summary = ""
     if head_dep_pkg and head_dep_ver and head_dep_sev:
-        badge = "🟥" if head_dep_sev == "critical" else ("🟧" if head_dep_sev == "high" else ("🟨" if head_dep_sev == "medium" else "🟦"))
+        badge = _badge_for_sev(head_dep_sev)
         advs_str = ", ".join(head_dep_advs[:3]) + ("…" if len(head_dep_advs) > 3 else "")
-        head_dep_summary = f"{badge} {head_dep_sev.upper()} deps on HEAD: {head_dep_pkg}@{head_dep_ver}" + (f" — {advs_str}" if advs_str else "")
+        head_dep_summary = f"{badge} {head_dep_sev.upper()} deps on HEAD: {head_dep_pkg}@{head_dep_ver}" + (
+            f" — {advs_str}" if advs_str else ""
+        )
 
-    # Only show head pre-existing callout if it’s (a) pre-existing and (b) worse than introduced overall worst
+    # Only show pre-existing HEAD callout if it's (a) pre-existing and (b) worse than introduced overall worst
     show_head_preexisting = False
     if head_dep_summary and not head_dep_is_introduced:
-        # Compare severities: if HEAD deps worst outranks introduced worst, surface it.
         introduced_rank = _sev_rank(overall_worst) if overall_worst else 99
         head_rank = _sev_rank(head_dep_sev)
         show_head_preexisting = head_rank < introduced_rank
+
+    # This is what decision_block.py expects:
+    head_preexisting_dep_summary = ""
+    if show_head_preexisting and head_dep_summary:
+        head_preexisting_dep_summary = f"(Pre-existing on HEAD; not gating) {head_dep_summary}"
 
     # Notes: baseline line + canonical gate notes
     notes = [
@@ -352,11 +371,14 @@ def main() -> int:
             "changed_pkgs_count": len(changed_pkgs),
             "introduced_clusters_list": classified["introduced"],
 
-            # AHA payloads
+            # AHA payloads (introduced blocker)
             "blocking_summary": blocking_summary,
             "blocking_fix": blocking_fix,
 
-            # Head snapshot loud deps (pre-existing callout)
+            # Pre-existing HEAD deps callout (for top block)
+            "head_preexisting_dep_summary": head_preexisting_dep_summary,
+
+            # (optional) keep raw head data around if you want it later
             "head_deps_worst_summary": head_dep_summary,
             "head_deps_worst_is_introduced": head_dep_is_introduced,
             "head_deps_worst_show_preexisting": show_head_preexisting,
@@ -368,7 +390,7 @@ def main() -> int:
             "semgrep_introduced_count": len(introduced_semgrep_findings),
             "semgrep_preexisting_count": len(preexisting_semgrep_findings),
 
-            # direction
+            # direction (optional)
             "deps_direction": "↑" if len(classified["introduced"]) > 0 else "→",
             "code_direction": "↑" if len(introduced_semgrep_findings) > 0 else "→",
             "deps_preexisting_clusters": len(classified["preexisting"]),

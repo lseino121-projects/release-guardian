@@ -37,15 +37,38 @@ def _detect_pkg_manager(workspace: str = "/github/workspace") -> str:
     return "npm"
 
 
+def _collect_dep_fixes(deps_findings: List[Finding]) -> dict[tuple[str, str], list[str]]:
+    fixes: dict[tuple[str, str], list[str]] = {}
+    for f in deps_findings:
+        pkg = (f.package or "").strip()
+        ver = (f.installed_version or "").strip()
+        if not pkg or not ver:
+            continue
+
+        raw = (f.fixed_version or "")
+        raw = raw.strip() if isinstance(raw, str) else ""
+        if not raw:
+            continue
+
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if not parts:
+            continue
+
+        key = (pkg, ver)
+        existing = fixes.get(key, [])
+        for p in parts:
+            if p not in existing:
+                existing.append(p)
+        fixes[key] = existing
+
+    return fixes
+
+
 def _dep_fix_commands(
     introduced_rows: list[dict],
     pkg_mgr: str,
     fixes_map: dict[tuple[str, str], list[str]],
 ) -> list[str]:
-    """
-    Upgrade introduced dependency vulns with best-effort fix versions.
-    If fix version is known, also emit override/resolution snippet for transitive deps.
-    """
     def best_fix(versions: list[str]) -> str | None:
         if not versions:
             return None
@@ -59,7 +82,7 @@ def _dep_fix_commands(
     def override_snippet(pm: str, pkg: str, ver: str) -> list[str]:
         if pm == "yarn":
             return [
-                "# If this is transitive, pin via package.json:",
+                "# If transitive, pin via package.json:",
                 "# {",
                 "#   \"resolutions\": {",
                 f"#     \"{pkg}\": \"{ver}\"",
@@ -69,7 +92,7 @@ def _dep_fix_commands(
             ]
         if pm == "pnpm":
             return [
-                "# If this is transitive, pin via package.json:",
+                "# If transitive, pin via package.json:",
                 "# {",
                 "#   \"pnpm\": {",
                 "#     \"overrides\": {",
@@ -80,7 +103,7 @@ def _dep_fix_commands(
                 "pnpm install",
             ]
         return [
-            "# If this is transitive, pin via package.json:",
+            "# If transitive, pin via package.json:",
             "# {",
             "#   \"overrides\": {",
             f"#     \"{pkg}\": \"{ver}\"",
@@ -121,7 +144,6 @@ def _dep_fix_commands(
 
     while cmds and cmds[-1] == "":
         cmds.pop()
-
     return cmds
 
 
@@ -129,17 +151,17 @@ def _code_fix_commands(introduced_semgrep: List[Finding]) -> list[str]:
     rules = {(f.id or "").lower() for f in (introduced_semgrep or [])}
     cmds: list[str] = []
 
-    if any("child-process-exec" in r or "child_process.exec" in r for r in rules):
-        cmds += [
-            "rg \"child_process\\.exec\\(\" -n",
-            "# Prefer: execFile(...) or spawn(...) with args array; never pass user input to a shell",
-        ]
-
     if any("subprocess-popen-shell-true" in r for r in rules):
         cmds += [
             "rg \"subprocess\\.(Popen|run|call)\\(\" -n",
             "rg \"shell\\s*=\\s*True\" -n",
             "# Prefer: subprocess.run([...], shell=False) and validate inputs",
+        ]
+
+    if any("child-process-exec" in r or "child_process.exec" in r for r in rules):
+        cmds += [
+            "rg \"child_process\\.exec\\(\" -n",
+            "# Prefer: execFile(...) or spawn(...) with args array; never pass user input to a shell",
         ]
 
     return cmds
@@ -184,36 +206,6 @@ def _unified_table(unified: dict, limit: int = 5, include_hint: bool = False) ->
     return "\n".join(lines)
 
 
-def _collect_dep_fixes(deps_findings: List[Finding]) -> dict[tuple[str, str], list[str]]:
-    """
-    Build (pkg, installed_version) -> unique list of fix versions observed across scanners.
-    """
-    fixes: dict[tuple[str, str], list[str]] = {}
-    for f in deps_findings:
-        pkg = (f.package or "").strip()
-        ver = (f.installed_version or "").strip()
-        if not pkg or not ver:
-            continue
-
-        raw = (f.fixed_version or "")
-        raw = raw.strip() if isinstance(raw, str) else ""
-        if not raw:
-            continue
-
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
-        if not parts:
-            continue
-
-        key = (pkg, ver)
-        existing = fixes.get(key, [])
-        for p in parts:
-            if p not in existing:
-                existing.append(p)
-        fixes[key] = existing
-
-    return fixes
-
-
 def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool = False) -> str:
     if not findings:
         return "_No findings._"
@@ -243,7 +235,6 @@ def _semgrep_table(findings: List[Finding], limit: int = 5, include_hint: bool =
         sev = (f.severity or "").lower()
         sev_cell = f"{_sev_badge(sev)} {_md(sev.upper())}".strip()
         lines.append(f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} |")
-
     return "\n".join(lines)
 
 
@@ -264,7 +255,6 @@ def _top_findings_table(findings: List[Finding], limit: int = 5) -> str:
         lines.append(
             f"| {sev_cell} | {_md(f.id)} | {_md(f.package)} | {_md(f.installed_version)} | {_md(f.fixed_version)} |"
         )
-
     return "\n".join(lines)
 
 
@@ -282,20 +272,13 @@ def render_pr_comment_md(
     unified_all = unified_summary(deps_findings)
 
     introduced_ct = int(report.context.get("introduced_clusters", 0) or 0)
-    preexisting_ct = int(report.context.get("preexisting_clusters", 0) or 0)
-    changed_pkgs_ct = int(report.context.get("changed_pkgs_count", 0) or 0)
-
     introduced_clusters_raw = report.context.get("introduced_clusters_list", None)
 
-    introduced_deps_note = ""
     introduced_rows: list[dict] = []
     introduced_deps_table = "_No introduced dependency vulnerabilities._"
 
     if introduced_clusters_raw is None:
-        introduced_deps_table = "_(Introduced dependency clusters list not provided to renderer yet.)_"
-        introduced_deps_note = (
-            "Pass `introduced_clusters_list` in report.context to show exact introduced dependency clusters."
-        )
+        introduced_deps_table = "_(Introduced dependency clusters list not provided.)_"
     else:
         introduced_clusters = introduced_clusters_raw or []
         if introduced_clusters:
@@ -305,6 +288,7 @@ def render_pr_comment_md(
 
     introduced_semgrep_table = _semgrep_table(introduced_semgrep_findings, include_hint=True)
 
+    # Quick fix block (only if there is something to fix)
     pkg_mgr = _detect_pkg_manager()
     fixes_map = _collect_dep_fixes(deps_findings)
     dep_cmds = _dep_fix_commands(introduced_rows, pkg_mgr, fixes_map)
@@ -312,50 +296,31 @@ def render_pr_comment_md(
 
     fix_lines: list[str] = []
     if dep_cmds:
-        fix_lines += [
-            f"**Dependency fixes ({pkg_mgr}):**",
-            "```bash",
-            *dep_cmds[:8],
-            "```",
-        ]
+        fix_lines += [f"**Dependency fixes ({pkg_mgr}):**", "```bash", *dep_cmds[:8], "```"]
     if code_cmds:
-        fix_lines += [
-            "**Code fixes (helpers):**",
-            "```bash",
-            *code_cmds[:10],
-            "```",
-        ]
+        fix_lines += ["**Code fixes (helpers):**", "```bash", *code_cmds[:10], "```"]
 
-    quick_fix_block = "\n".join(fix_lines).strip() if fix_lines else "_No quick-fix commands available._"
+    quick_fix_section = ""
+    if fix_lines:
+        quick_fix_section = "\n### Quick fix (copy/paste)\n" + "\n".join(fix_lines) + "\n"
 
-    # Semgrep baseline counts (helps explain “GO even with findings on HEAD snapshot”)
-    semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
-    semgrep_pre = int(report.context.get("semgrep_preexisting_count", 0) or 0)
-    semgrep_baseline_line = f"_Baseline: introduced={semgrep_intro}, preexisting={semgrep_pre}_"
+    # WHY: keep to ONE bullet so it doesn’t repeat the decision block
+    why_lines = "- Introduced-only gating. Details below."
 
-    # ✅ Canonical WHY: show the gate narrative + gate decision (last 2 notes),
-    # and optionally the baseline line (first note) if present.
-    notes_all = report.notes or []
-    why_notes: list[str] = []
-    if notes_all:
-        why_notes.append(notes_all[0])              # Baselines: ...
-    if len(notes_all) >= 3:
-        why_notes.extend(notes_all[-2:])            # gate narrative + decision
-    elif len(notes_all) >= 2:
-        why_notes.append(notes_all[-1])             # at least the decision line
-
-    why_lines = "\n".join([f"- {_md(n)}" for n in why_notes]) if why_notes else "- (No notes)"
-
-    # Details sections
+    # Details (collapsed)
     trivy_table = _top_findings_table(trivy_findings)
     grype_table = _top_findings_table(grype_findings)
     semgrep_table = _semgrep_table(semgrep_findings)
 
+    # HEAD snapshot (includes pre-existing) — collapsed
     unified_all_table = _unified_table(unified_all)
-
     worst_all = "NONE" if unified_all.get("clusters_count") == 0 else (
         unified_all["worst_severity"].upper() if unified_all.get("worst_severity") else "UNKNOWN"
     )
+
+    semgrep_intro = int(report.context.get("semgrep_introduced_count", 0) or 0)
+    semgrep_pre = int(report.context.get("semgrep_preexisting_count", 0) or 0)
+    semgrep_baseline_line = f"_Baseline: introduced={semgrep_intro}, preexisting={semgrep_pre}_"
 
     md = f"""{marker}
 {decision_block}
@@ -367,50 +332,40 @@ def render_pr_comment_md(
 
 ### Introduced risk (what this PR adds)
 **Dependencies (introduced clusters):** {introduced_ct}  
-{introduced_deps_note}
 {introduced_deps_table}
 
 **Code (Semgrep introduced):** {len(introduced_semgrep_findings)}
 {introduced_semgrep_table}
-
-### Quick fix (copy/paste)
-{quick_fix_block}
+{quick_fix_section}
 
 <details>
-<summary><b>Details: Top findings (Trivy)</b></summary>
+<summary><b>Details (expand): scanners + HEAD snapshot + full tables</b></summary>
 
+#### Details: Top findings (Trivy)
 {trivy_table}
-</details>
 
-<details>
-<summary><b>Details: Top findings (Grype)</b></summary>
-
+#### Details: Top findings (Grype)
 {grype_table}
-</details>
 
-<details>
-<summary><b>Details: Semgrep findings (HEAD snapshot)</b></summary>
-
+#### Details: Semgrep findings (HEAD snapshot)
 {semgrep_baseline_line}
 
 {semgrep_table}
-</details>
 
-### Dependency vulnerability snapshot (HEAD, includes pre-existing)
-_This section is informational. Gating is based on **introduced** risk only._
+#### Details: Dependency snapshot on HEAD (includes pre-existing; informational)
 - **Clusters (pkg@version):** {unified_all["clusters_count"]}
-- **Introduced deps worst:** {(report.context.get("introduced_dep_worst_severity") or "NONE").upper()}
 - **Total advisories (all tools):** {unified_all["advisories_count"]}
-- **Worst severity:** {worst_all}
-- **Introduced clusters:** {introduced_ct} | **Pre-existing clusters:** {preexisting_ct} | **Changed packages:** {changed_pkgs_ct}
+- **Worst severity (HEAD):** {worst_all}
 
 {unified_all_table}
 
-### Scanners
+#### Details: Scanners
 - Trivy: ✅ ({len(trivy_findings)} findings)
 - Syft: ✅ (SBOM generated)
 - Grype: ✅ ({len(grype_findings)} findings)
 - Semgrep: ✅ ({len(semgrep_findings)} findings)
+
+</details>
 
 ---
 _Release Guardian (RDI) — decision intelligence at PR time._

@@ -27,17 +27,10 @@ def render_decision_block(report: RDIReport) -> str:
 
     ctx = report.context or {}
 
-    # Core summary
+    # Introduced-only core counters
     deps_clusters = int(ctx.get("introduced_clusters", 0) or 0)
     deps_advs = int(ctx.get("introduced_dep_advisories_count", 0) or 0)
     code_ct = int(ctx.get("introduced_code_findings_count", 0) or 0)
-
-    overall_worst = (ctx.get("introduced_worst_severity") or "none").upper()
-    dep_worst = (ctx.get("introduced_dep_worst_severity") or "none").upper()
-    code_worst = (ctx.get("introduced_code_worst_severity") or "none").upper()
-
-    worst_sources = ctx.get("introduced_worst_sources") or []
-    sources_str = " + ".join(worst_sources) if worst_sources else "none"
 
     threshold = (ctx.get("severity_threshold") or "high").upper()
 
@@ -46,49 +39,52 @@ def render_decision_block(report: RDIReport) -> str:
     semgrep_status = (ctx.get("semgrep_baseline_status") or "OK").upper()
     conf_badge = _confidence_badge(confidence)
 
-    # Direction (short)
-    deps_pre = int(ctx.get("deps_preexisting_clusters", ctx.get("preexisting_clusters", 0)) or 0)
-    code_pre = int(ctx.get("code_preexisting_findings", ctx.get("semgrep_preexisting_count", 0)) or 0)
-    deps_dir = (ctx.get("deps_direction") or ("↑" if deps_clusters else "→"))
-    code_dir = (ctx.get("code_direction") or ("↑" if code_ct else "→"))
+    overall_worst = (ctx.get("introduced_worst_severity") or "none").upper()
+    worst_sources = ctx.get("introduced_worst_sources") or []
+    worst_sources_str = " + ".join(worst_sources) if worst_sources else "none"
 
-    # Canonical decision line: mirror gate_verdict (so "Why" never disagrees)
-    gate_notes = (report.notes or [])[1:]  # skip "Baselines: ..."
-    decision_line = gate_notes[1] if len(gate_notes) >= 2 else ""
-    if not decision_line:
-        decision_line = (
-            f"Introduced risk is below threshold ({threshold})."
-            if verdict == "go"
-            else f"Introduced risk meets/exceeds threshold ({threshold})."
-        )
-
-    # AHA: blocking introduced culprit + fix (computed in main)
+    # -------------------------
+    # AHA: show the blocker immediately
+    # Expect these to be passed by main.py (recommended):
+    #   blocking_summary: short string
+    #   blocking_fix: short string
+    # -------------------------
     blocking_summary = (ctx.get("blocking_summary") or "").strip()
     blocking_fix = (ctx.get("blocking_fix") or "").strip()
 
-    # AHA: loudest pre-existing deps on HEAD (informational)
-    head_dep_summary = (ctx.get("head_deps_worst_summary") or "").strip()
-    show_head_preexisting = bool(ctx.get("head_deps_worst_show_preexisting", False))
+    # -------------------------
+    # Optional: show pre-existing HEAD deps worst (NOT gating)
+    # Pass these from main.py if you want minimist to appear at the top:
+    #   head_preexisting_dep_summary: str
+    # -------------------------
+    preexisting_head_line = (ctx.get("head_preexisting_dep_summary") or "").strip()
 
-    lines = [header, ""]
+    # -------------------------
+    # Compact decision line (avoid repeating “why”)
+    # -------------------------
+    if verdict == "go":
+        decision_line = f"Decision: Introduced risk is below threshold ({threshold})."
+    else:
+        decision_line = f"Decision: Introduced risk meets/exceeds threshold ({threshold})."
 
-    if verdict != "go" and blocking_summary:
+    # -------------------------
+    # Render (keep very tight)
+    # -------------------------
+    lines: list[str] = [header, ""]
+
+    if blocking_summary:
         lines.append(blocking_summary)
-        if blocking_fix:
-            lines.append(blocking_fix)
-        lines.append("")
+    if blocking_fix:
+        lines.append(f"Fix: {blocking_fix}")
 
-    # This is the missing “minimist” visibility:
-    # show it when it's worse than the introduced blocker, and pre-existing.
-    if show_head_preexisting and head_dep_summary:
-        lines.append(f"(Pre-existing on HEAD; not gating) {head_dep_summary}")
-        lines.append("")
+    if preexisting_head_line:
+        lines += ["", preexisting_head_line]
 
     lines += [
-        f"Introduced risk: deps={deps_clusters} cluster / {deps_advs} advisories, code={code_ct} findings.",
-        f"Worst severity: {overall_worst} (source: {sources_str}; deps={dep_worst}, code={code_worst}).",
-        f"Direction: deps {deps_dir} (preexisting={deps_pre}), code {code_dir} (preexisting={code_pre}).",
-        f"Decision: {decision_line}",
+        "",
+        f"Introduced-only: deps={deps_clusters} clusters / {deps_advs} advisories, code={code_ct} findings.",
+        f"Worst introduced severity: {overall_worst} (source: {worst_sources_str}).",
+        decision_line,
         f"Confidence: {conf_badge} {confidence} (baseline: node={node_status}, semgrep={semgrep_status}).",
     ]
 
